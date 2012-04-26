@@ -9,12 +9,33 @@ NoteBrowser.prototype._init = function() {
         var hash = document.location.hash;
         if (hash.length <= 1)
             return;
+        if ('#' + lthis._currentNoteId == hash)
+            return; /* TODO what about note titles? */
         /* TODO change the hash back if the note was not found? */
         lthis._showNote(hash.substr(1));
     }
 
     $(window).on('hashchange', checkHash);
     this._dbInterface.on('ready', checkHash);
+
+    $('#newNoteButton').click(function() {
+        var n = Note.fromIncompleteDbObject({title: "New Note"}, lthis._dbInterface);
+        n.setTextAndSave("", function(err, note) {
+            if (err) {
+                lthis.showError(err);
+                return;
+            } else {
+                var v = new NoteViewer(note, lthis);
+                v.show(true);
+                var id = note.getID();
+                /* TODO make this a live value and do not use the event */
+                lthis._currentNoteId = id;
+                lthis._noteList.update();
+                lthis._trigger("activeNoteChanged", id);
+            }
+        });
+
+    });
 }
 NoteBrowser.prototype.showError = function(message) {
     $('<div class="alert alert-error"><a class="close" data-dismiss="alert" href="#">&times;</a></div>')
@@ -34,6 +55,7 @@ NoteBrowser.prototype._showNote = function(id) {
         }
         var viewer = new NoteViewer(note, lthis);
         viewer.show();
+        lthis._currentNoteId = note.getID();
         lthis._trigger("activeNoteChanged", id);
     });
 }
@@ -55,7 +77,7 @@ function NoteViewer(note, noteBrowser) {
     this._textArea = null;
     this._viewArea = null;
 }
-NoteViewer.prototype.show = function() {
+NoteViewer.prototype.show = function(editMode) {
     var lthis = this;
 
     this._container = $('<div/>');
@@ -77,7 +99,11 @@ NoteViewer.prototype.show = function() {
     this._viewArea = $('<div/>')
         .appendTo(this._container);
 
-    this._toViewMode();
+    if (editMode) {
+        this._toEditMode();
+    } else {
+        this._toViewMode();
+    }
 
     $('#noteArea').empty();
     this._container.appendTo('#noteArea');
