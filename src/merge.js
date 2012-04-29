@@ -158,6 +158,7 @@ Merge.prototype.getMergedText = function getMergedText() {
 
     var pos = 0;
     while (streamA.currentOp[0] !== null || streamB.currentOp[0] !== null) {
+        /* TODO what if both insert the same symbol? */
         while (streamA.currentOp[0] === Diff.OPS.insert) {
             mergedText += streamA.currentOp[1];
             streamA.nextOp();
