@@ -14,7 +14,7 @@ function addEvents(className, possibleEvents) {
     className.prototype.off = function(event, handler) {
         var hand = this._eventHandlers[event];
         for (var i = 0; i < hand.length; i ++) {
-            if (hand[i] == handler) {
+            if (hand[i] === handler) {
                 hand.splice(i, 1);
                 i --;
             }

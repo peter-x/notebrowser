@@ -15,7 +15,7 @@ Diff.prototype._forwardSearch = function forwardSearch(p1, p2, q1, q2) {
         
         for (var j = q1 + 1; j <= q2; j++) {
             var diag = costs[(i - 1) % 2][j - 1];
-            if (s1[i - 1] != s2[j - 1]) diag += 2; /* delete + insert */
+            if (s1[i - 1] !== s2[j - 1]) diag += 2; /* delete + insert */
             
             costs[i % 2][j] = Math.min(diag,
                                    costs[(i - 1) % 2][j] + 1, /* delete */
@@ -39,7 +39,7 @@ Diff.prototype._reverseSearch = function reverseSearch(p1, p2, q1, q2) {
         
         for (var j = q2 - 1; j >= q1; j--) {
             var diag = costs[(i + 1) % 2][j + 1];
-            if (s1[i] != s2[j]) diag += 2; /* delete + insert */
+            if (s1[i] !== s2[j]) diag += 2; /* delete + insert */
             
             costs[i % 2][j] = Math.min(diag, 
                                    costs[(i + 1) % 2][j] + 1, 

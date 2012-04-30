@@ -17,7 +17,7 @@ NoteBrowser.prototype._init = function() {
         var hash = document.location.hash;
         if (hash.length <= 1)
             return;
-        if ('#' + lthis._currentNoteId == hash)
+        if ('#' + lthis._currentNoteId === hash)
             return; /* TODO what about note titles? */
         /* TODO change the hash back if the note was not found? */
         lthis._showNote(hash.substr(1));
@@ -168,7 +168,7 @@ function DBInterface() {
 
     var lthis = this;
     window.setTimeout(function() {
-        if (lthis._backendType == 'couch') {
+        if (lthis._backendType === 'couch') {
             lthis._initCouch();
         } else {
             lthis._initPouch();
@@ -209,7 +209,7 @@ DBInterface.prototype.getAllNoteTitles = function() {
     var lthis = this;
 
     var d = $.Deferred();
-    if (this._backendType == 'couch') {
+    if (this._backendType === 'couch') {
         this._db.view('default/notesByTitle', {
             success: function(res) {
                 var notes = [];
@@ -225,7 +225,7 @@ DBInterface.prototype.getAllNoteTitles = function() {
             include_docs: true
         });
     } else {
-        var queryFun = function(doc) { if (doc.type == 'note') emit(doc.title, null); };
+        var queryFun = function(doc) { if (doc.type === 'note') emit(doc.title, null); };
         this._db.query(queryFun, null, function(err, res) {
             if (err) {
                 d.reject("Database error: " + err.error + " (" + err.reason + ")");
@@ -247,7 +247,7 @@ DBInterface.prototype._getDoc = function(id) {
     var lthis = this;
 
     var d = $.Deferred();
-    if (this._backendType == 'couch') {
+    if (this._backendType === 'couch') {
         this._db.openDoc(id, {
             success: function(doc) { d.resolve(doc); },
             error: function(err) { d.reject("Database error: " + err.error + " (" + err.reason + ")"); }
@@ -277,7 +277,7 @@ DBInterface.prototype.getRevisionParents = function(revisionIDs) {
     var lthis = this;
 
     var d = $.Deferred();
-    if (this._backendType == 'couch') {
+    if (this._backendType === 'couch') {
         this._db.view('default/parentRevision', {
             success: function(res) {
                 var parents = [];
@@ -303,7 +303,7 @@ DBInterface.prototype.saveDoc = function(doc) {
         return $.Deferred().reject("Not connected to database.").promise();
 
     var d = $.Deferred();
-    if (this._backendType == 'couch') {
+    if (this._backendType === 'couch') {
         this._db.saveDoc(doc, {
             success: function(res) {
                 doc._id = res.id;
@@ -428,7 +428,7 @@ Note.prototype._save = function() {
                     lthis._id = doc._id;
                     lthis._rev = doc._rev;
                     lthis._title = doc.title;
-                    if (lthis._headRev != doc.headRev)
+                    if (lthis._headRev !== doc.headRev)
                         lthis._headRevObj = null;
                     lthis._headRev = doc.headRev;
                     d.resolve(lthis);
@@ -581,19 +581,19 @@ NoteRevision.prototype._findCommonAncestor = function(otherRev) {
     /* first try it directly using the parent IDs we already have */
     var idA = this.getID();
     var idB = otherRev.getID();
-    if (idA == idB)
+    if (idA === idB)
         return $.Deferred().resolve(idA).promise();
 
     var pA = this.getParents();
     var pB = otherRev.getParents();
-    if ($.inArray(idA, pB))
+    if ($.inArray(idA, pB) >= 0)
         return $.Deferred().resolve(idA).promise();
-    if ($.inArray(idB, pA))
+    if ($.inArray(idB, pA) >= 0)
         return $.Deferred().resolve(idB).promise();
 
     for (var i = 0; i < pA.length; i ++)
         for (var j = 0; j < pB.length; j ++)
-            if (pA[i] == pB[j])
+            if (pA[i] === pB[j])
                 return $.Deferred().resolve(pA[i]).promise();
 
     /* now hand it over to the professionals */
