@@ -114,7 +114,7 @@ NoteViewer.prototype._toEditMode = function() {
             lthis._viewArea
                 .hide()
                 .empty();
-            lthis._textArea.text(text);
+            lthis._textArea.val(text);
             lthis._textArea.show();
             lthis._textArea.focus();
         })
@@ -392,111 +392,98 @@ Note.prototype.getTitle = function() {
 }
 Note.prototype.getText = function() {
     var lthis = this;
-    if (this._headRevObj !== null) {
-        var d = $.Deferred();
-        d.resolve(lthis._headRevObj.getText());
-        return d.promise();
+    if (this._headRev === null) {
+        return $.Deferred().resolve('').promise();
+    } else if (this._headRevObj !== null) {
+        return $.Deferred().resolve(lthis._headRevObj.getText()).promise();
     } else {
         return NoteRevision.get(lthis._headRev)
             .pipe(function(h) { return (lthis._headRevObj = h).getText(); },
                   function(err) { return err; });
     }
 }
+Note.prototype.getHeadRevision = function() {
+    var lthis = this;
+    if (this._headRevObj !== null) {
+        return $.Deferred().resolve(lthis._headRevObj.getText()).promise();
+    } else {
+        return NoteRevision.get(lthis._headRev);
+    }
+}
 Note.prototype._save = function() {
     var lthis = this;
-    var d = $.Deferred();
 
-    this.getText()
-        .fail(function(err) { d.reject(err); })
-        .done(function(text) {
-            var title = Note._getTitleFromText(text);
-            var doc = {
-                'type': 'note',
-                'title': title,
-                'headRev': lthis._headRev
-            };
-            if (lthis._id !== null && lthis._rev !== null) {
-                doc._id = lthis._id;
-                doc._rev = lthis._rev;
-            }
-            dbInterface.saveDoc(doc)
-                /* XXX detect conflicts */
-                .fail(function(err, conflict) { d.reject(err, conflict); })
-                .done(function(doc) {
-                    /* TODO could this go wrong if two parallel save operations from this
-                     * client end up the other way round? */
-                    lthis._id = doc._id;
-                    lthis._rev = doc._rev;
-                    lthis._title = doc.title;
-                    if (lthis._headRev !== doc.headRev)
-                        lthis._headRevObj = null;
-                    lthis._headRev = doc.headRev;
-                    d.resolve(lthis);
-                });
+    return this.getText().pipe(function(text) {
+        var title = Note._getTitleFromText(text);
+        var doc = {
+            'type': 'note',
+            'title': title,
+            'headRev': lthis._headRev
+        };
+        if (lthis._id !== null && lthis._rev !== null) {
+            doc._id = lthis._id;
+            doc._rev = lthis._rev;
+        }
+        return dbInterface.saveDoc(doc).pipe(function(doc) {
+            /* TODO could this go wrong if two parallel save operations from this
+             * client end up the other way round? */
+            lthis._id = doc._id;
+            lthis._rev = doc._rev;
+            lthis._title = doc.title;
+            if (lthis._headRev !== doc.headRev)
+                lthis._headRevObj = null;
+            lthis._headRev = doc.headRev;
+            return lthis;
         });
-    return d.promise();
+    });
 }
 Note.prototype.save = function(data) {
     var lthis = this;
-    var d = $.Deferred();
-    var nrSave = NoteRevision.createNew(data.text, data.author || null, data.date || (new Date()),
-                        data.revType || "edit", data.parents || [this._headRev]);
-    nrSave.fail(function(err) { d.reject("Error saving revision: " + err); });
-    nrSave.done(function(nr) {
-        lthis._updateToRevision(nr._id, nr)
-            .fail(function(err) { d.reject("Error saving note: " + err); })
-            .done(function() { d.resolve(lthis); });
-    });
-    return d.promise();
+    return NoteRevision.createNew(this._id, data.text, data.author || null, data.date || (new Date()),
+                        data.revType || "edit", data.parents || [this._headRev])
+        .pipe(function(nr) {
+            return lthis._updateToRevision(nr._id, nr);
+        }, function(err) {
+            return "Error saving revision: " + err;
+        });
 }
 Note.prototype._updateToRevision = function(rev, revObj) {
     var lthis = this;
-    var d = $.Deferred();
     /* XXX we shold not store this in the object until saved */
     lthis._headRev = rev;
     lthis._headRevObj = revObj;
-    lthis._save()
-        .done(function() { d.resolve(lthis); })
-        .fail(function(err, conflict) {
-            if (!conflict) {
-                d.reject("Error saving note: " + err);
-                return;
-            }
-            Note.get(lthis._id)
-                .fail(function(err) { d.reject("Error saving note: " + err); })
-                .done(function(currentNote) {
-                    currentNote.mergeWith(lthis, false)
-                        .fail(function(err) { d.reject("Error saving note (in conflict resolution): " + err); })
-                        .done(function() {
+    return lthis._save()
+        .pipe(null, function(err, conflict) {
+            if (!conflict)
+                return "Error saving note: " + err;
+            return Note.get(lthis._id)
+                .pipe(function(currentNote) {
+                    return currentNote.mergeWith(lthis, false)
+                        .pipe(function() {
                             lthis._rev = currentNote._rev;
                             lthis._title = currentNote._title;
                             lthis._headRev = currentNote._headRev;
                             lthis._headRevObj = currentNote._headRevObj;
-                            d.resolve(lthis);
+                            return lthis;
+                        }, function(err) {
+                            return "Error saving note (in conflict resolution): " + err;
                         });
-                });
+                }, function(err) { return "Error saving note: " + err; });
         });
-    return d.promise();
 }
 Note.prototype.mergeWith = function(otherNote, deleteOther) {
     var lthis = this;
-    var d = $.Deferred();
-    lthis.getText()
-        .fail(function(err) { d.reject(err); })
-        .done(function() {
-            otherNote.getText()
-                .fail(function(err) { d.reject(err); })
-                .done(function() {
-                    lthis._headRevObj.createMergedRevision(otherNote._headRevObj)
-                        .fail(function(err) { d.reject(err); })
-                        .done(function(newRevObj) {
-                            lthis._updateToRevision(newRevObj.getID(), newRevObj)
-                                .fail(function(err) { d.reject(err); })
-                                .done(function() { d.resolve(lthis); });
+    return lthis.getText()
+        .pipe(function() {
+            return otherNote.getText()
+                .pipe(function() {
+                    return lthis._headRevObj.createMergedRevision(otherNote._headRevObj)
+                        .pipe(function(newRevObj) {
+                            return lthis._updateToRevision(newRevObj.getID(), newRevObj);
                         });
                 });
         });
-    return d.promise();
+    /* TODO use deleteOther */
 }
 /* static */
 Note._getTitleFromText = function(text) {
@@ -522,15 +509,19 @@ Note.fromDBObject = function(doc) {
     return n;
 }
 Note.create = function(data) {
+    /* first create the note to obtain an ID, then save the initial revision */
     var n = new Note();
-    data.parents = [];
-    data.revType = "create";
-    return n.save(data);
+    return n._save().pipe(function(n) {
+        data.parents = [];
+        data.revType = "create";
+        return n.save(data);
+    });
 }
 
 function NoteRevision() {
     this._id = null;
     this._rev = null;
+    this._note = null;
     this._date = null;
     this._author = null;
     this._revType = null; /* "edit", "create", "auto merge", "manual merge" */
@@ -549,13 +540,10 @@ NoteRevision.prototype.getParents = function() {
 /* TODO revType, date, author? */
 NoteRevision.prototype.createMergedRevision = function(otherRev) {
     var lthis = this;
-    var d = $.Deferred();
-    this._findCommonAncestor(otherRev)
-        .fail(function(err) { d.reject(err); })
-        .done(function(parentId) {
-            NoteRevision.get(parentId)
-                .fail(function(err) { d.reject(err); })
-                .done(function(parentRev) {
+    return this._findCommonAncestor(otherRev)
+        .pipe(function(parentId) {
+            return NoteRevision.get(parentId)
+                .pipe(function(parentRev) {
                     var textA = lthis.getText();
                     var textB = otherRev.getText();
                     var textParent = parentRev.getText();
@@ -568,10 +556,8 @@ NoteRevision.prototype.createMergedRevision = function(otherRev) {
                         m = new Merge(textParent, textB, textA);
                     }
                     textMerged = m.getMergedText();
-                    NoteRevision.createNew(textMerged, null, new Date(), "auto merge",
-                                          [lthis.getID(), otherRev.getID()])
-                        .fail(function(err) { d.reject(err); })
-                        .done(function(mergedRev) { d.resolve(mergedRev); });
+                    return NoteRevision.createNew(lthis._note, textMerged, null, new Date(), "auto merge",
+                                          [lthis.getID(), otherRev.getID()]);
                 });
         });
 
@@ -604,6 +590,7 @@ NoteRevision._fromDBObject = function(doc) {
     var nr = new NoteRevision();
     nr._id = doc._id;
     nr._rev = doc._rev;
+    nr._note = doc.note;
     nr._date = doc.date; /* XXX parse? */
     nr._author = doc.author;
     nr._revType = doc.revType;
@@ -615,22 +602,17 @@ NoteRevision.get = function get(id) {
     return dbInterface.getNoteRevision(id).pipe(NoteRevision._fromDBObject,
                     function(err) { return err; });
 }
-NoteRevision.createNew = function createNew(text, author, date, revType, parents) {
+NoteRevision.createNew = function createNew(noteID, text, author, date, revType, parents) {
     var doc = {
         type: "noteRevision",
+        note: noteID,
         date: date,
         author: author,
         revType: revType,
         parents: parents.sort(),
         text: text
     }
-    if (parents.length != 0) {
-        /* The revision graphs for two different notes should be separated.
-         * If two new notes with identical content are created, the two
-         * revisions will have the same id. To avoid this, let the server
-         * choose an id in this case. */
-        doc._id = 'rev-' + MD5.hex_md5(JSON.stringify(doc));
-    }
+    doc._id = 'rev-' + MD5.hex_md5(JSON.stringify(doc));
     return dbInterface.saveDoc(doc)
         .pipe(NoteRevision._fromDBObject, function(err) { return err; }).promise();
 }
