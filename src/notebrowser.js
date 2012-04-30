@@ -164,7 +164,7 @@ NoteViewer.prototype._cancelChanges = function() {
 function DBInterface() {
     this._db = null;
     this._backendType = 'couch'; /* or pouch */
-    this._backendUrl = 'http://localhost:1234';
+    this._backendUrl = 'http://localhost:5984';
 
     var lthis = this;
     window.setTimeout(function() {
