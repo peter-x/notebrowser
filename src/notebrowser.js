@@ -188,9 +188,18 @@ function RevisionGraph(note, container) {
     this._note = note;
     this._revisions = null;
     this._revisionPositions = null;
+    this._revisionPositionsInverted = null;
+
+    /* settings */
+    this._horDistance = 60;
+    this._verDistance = 30;
+    this._horBorder = 20;
+    this._verBorder = 20;
+
+    this._width = 0;
+    this._height = 0;
     this._container = container;
-    this._canvas = $('<canvas style="width: 500px; height: 100px;"></canvas>')
-        .appendTo(this._container);
+    this._canvas = null;
     this._update();
 }
 RevisionGraph.prototype._update = function() {
@@ -210,8 +219,7 @@ RevisionGraph.prototype._getRoot = function() {
         id = this._revisions[id].parents[0];
     return id;
 }
-RevisionGraph.prototype._updateHierarchy = function() {
-    var root = this._getRoot();
+RevisionGraph.prototype._getChildrenMap = function() {
     var children = {};
     for (var id in this._revisions)
         children[id] = [];
@@ -220,6 +228,11 @@ RevisionGraph.prototype._updateHierarchy = function() {
             children[p].push(id);
         });
     }
+    return children;
+}
+RevisionGraph.prototype._updateHierarchy = function() {
+    var root = this._getRoot();
+    var children = this._getChildrenMap();
 
     this._revisionPositions = {};
     var queue = {};
@@ -251,6 +264,20 @@ RevisionGraph.prototype._updateHierarchy = function() {
 
         x ++;
     }
+    this._updateRevisionPositionsInverted();
+}
+RevisionGraph.prototype._updateRevisionPositionsInverted = function() {
+    this._revisionPositionsInverted = {};
+    this._width = 0;
+    this._height = 0;
+    for (var id in this._revisionPositions) {
+        var pos = this._revisionPositions[id];
+        this._revisionPositionsInverted[pos[0] + ',' + pos[1]] = id;
+        this._width = Math.max(this._width, pos[0]);
+        this._height = Math.max(this._height, Math.abs(pos[1]) * 2);
+    }
+    this._width = this._width * this._horDistance + 2 * this._horBorder;
+    this._height = this._height * this._verDistance + 2 * this._verBorder;
 }
 RevisionGraph.prototype._allParentsArePositioned = function(revId) {
     var r = this._revisions[revId];
@@ -261,12 +288,41 @@ RevisionGraph.prototype._allParentsArePositioned = function(revId) {
     return true;
 }
 RevisionGraph.prototype._getPosition = function(id) {
-    var x = this._revisionPositions[id][0] * 60 + 20;
-    var y = this._canvas[0].height / 2 + this._revisionPositions[id][1] * 30;
+    var x = this._revisionPositions[id][0] * this._horDistance + this._horBorder;
+    var y = this._canvas[0].height / 2 + this._revisionPositions[id][1] * this._verDistance;
     return [x, y];
 }
+RevisionGraph.prototype._updateUIElements = function() {
+    this._container.empty();
+    var div = $('<div style="position: relative; width: 100%; overflow: auto;"/>')
+                .appendTo(this._container);
+    this._canvas = $('<canvas style="width: 500px; height: 100px;"></canvas>')
+        .appendTo(div);
+    this._canvas.width(this._width);
+    this._canvas.height(this._height);
+    this._canvas[0].width = this._width; /* clear and set size */
+    this._canvas[0].height = this._height;
+
+    for (var id in this._revisions) {
+        var r = this._revisions[id];
+        var pos = this._getPosition(id);
+        var trigger = $('<div/>');
+        trigger.css({position: 'absolute', left: pos[0] - 5, top: pos[1] - 5, width: 10, height: 10});
+        trigger.attr('title', r._id);
+        trigger.appendTo(div);
+        var content = $('<p><b>Date:</b> <span class="date"> </span><br/>' +
+                           '<b>Author:</b> <span class="author"> </span><br/>' +
+                           '<b>Type:</b> <span class="revType"> </span></p>');
+        $('.date', content).text(r.date);
+        $('.author', content).text(r.author);
+        $('.revType', content).text(r.revType);
+        trigger.popover({placement: 'bottom', html: true,
+                         content: content.html() });
+    }
+}
 RevisionGraph.prototype.redraw = function() {
-    this._canvas[0].width = this._canvas.width(); /* clear and set size */
+    this._updateUIElements();
+
     var ctx = this._canvas[0].getContext('2d');
 
     /* draw lines */
@@ -278,7 +334,7 @@ RevisionGraph.prototype.redraw = function() {
             var p = r.parents[k];
             var pPos = this._getPosition(p);
             ctx.beginPath();
-            ctx.lineWidth = 3.0;
+            ctx.lineWidth = 2.5;
             ctx.moveTo(rPos[0], rPos[1]);
             ctx.lineTo(pPos[0], pPos[1]);
             ctx.stroke();
@@ -291,7 +347,7 @@ RevisionGraph.prototype.redraw = function() {
         var rPos = this._getPosition(id);
         ctx.beginPath();
         ctx.fillStyle = "#ffffff";
-        ctx.arc(rPos[0], rPos[1], 7, 0, Math.PI * 2, true);
+        ctx.arc(rPos[0], rPos[1], 5, 0, Math.PI * 2, true);
         ctx.closePath();
         ctx.fill();
 
@@ -305,7 +361,7 @@ RevisionGraph.prototype.redraw = function() {
         } else {
             ctx.fillStyle = '#000000';
         }
-        ctx.arc(rPos[0], rPos[1], 5, 0, Math.PI * 2, true);
+        ctx.arc(rPos[0], rPos[1], 3, 0, Math.PI * 2, true);
         ctx.closePath();
         ctx.fill();
     }
