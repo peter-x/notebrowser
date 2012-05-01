@@ -814,7 +814,7 @@ NoteRevision.prototype._findCommonAncestor = function(otherRev) {
                 return $.Deferred().resolve(pA[i]).promise();
 
     /* now hand it over to the professionals */
-    return FindCommonAncestor(this._id, otherRev.getID());
+    return FindCommonAncestor(this._note, this._id, otherRev.getID());
 }
 /* static */
 NoteRevision._fromDBObject = function(doc) {
@@ -849,47 +849,47 @@ NoteRevision.createNew = function createNew(noteID, text, author, date, revType,
 }
 
 /* TODO use some view that retrieves all metadata for all revisions */
-function FindCommonAncestor(revA, revB) {
-    var ancestorsA = {};
-    var ancestorsB = {};
+function FindCommonAncestor(note, revA, revB) {
+    return dbInterface.getRevisionMetadata(note)
+        .pipe(function(revisions) {
+            var ancestorsA = {};
+            var ancestorsB = {};
+            var newIDsA = [revA];
+            var newIDsB = [revB];
 
-    var deferred = $.Deferred();
-
-    function step(newIDsA, newIDsB) {
-        if (newIDsA.length == 0 && newIDsB.length == 0) {
-            deferred.reject("No common parent found.");
-            return;
-        }
-        for (var i = 0; i < newIDsA.length; i ++) {
-            var id = newIDsA[i];
-            ancestorsA[id] = true;
-            if (id in newIDsB || id in ancestorsB) {
-                deferred.resolve(id);
-                return;
-            }
-        }
-        for (var i = 0; i < newIDsB.length; i ++) {
-            var id = newIDsB[i];
-            ancestorsB[id] = true;
-            if (id in ancestorsA) {
-                deferred.resolve(id);
-                return;
-            }
-        }
-
-        dbInterface.getRevisionParents(newIDsA)
-            .fail(function(err) { deferred.reject(err); })
-            .done(function(parentsA) {
-                dbInterface.getRevisionParents(newIDsB)
-                    .fail(function(err) { deferred.reject(err); })
-                    .done(function(parentsB) {
-                        step(parentsA, parentsB);
+            function getAllParents(ids) {
+                var parents = {};
+                ids.forEach(function(id) {
+                    revisions[id].parents.forEach(function(p) {
+                        parents[p] = 1;
                     });
-            });
-    }
+                });
+                var list = [];
+                for (var p in parents)
+                    list.push(p);
+                return list
+            }
 
-    step([revA], [revB]);
-    return deferred.promise();
+            while (newIDsA.length > 0 || newIDsB.length > 0) {
+                for (var i = 0; i < newIDsA.length; i ++) {
+                    var id = newIDsA[i];
+                    ancestorsA[id] = true;
+                    if (id in newIDsB || id in ancestorsB)
+                        return $.Deferred().resolve(id).promise();
+                }
+                for (var i = 0; i < newIDsB.length; i ++) {
+                    var id = newIDsB[i];
+                    ancestorsB[id] = true;
+                    if (id in ancestorsA)
+                        return $.Deferred().resolve(id).promise();
+                }
+
+                newIDsA = getAllParents(newIDsA);
+                newIDsB = getAllParents(newIDsB);
+            }
+
+            return $.Deferred().reject("No common parent found.").promise();
+        });
 }
 
 noteBrowser = new NoteBrowser();
