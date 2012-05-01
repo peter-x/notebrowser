@@ -68,8 +68,13 @@ function NoteViewer(note) {
     this._buttonEdit = null;
     this._buttonSave = null;
     this._buttonCancel = null;
+    this._buttonRevisionGraph = null;
+
+    this._revisionGraphArea = null;
     this._textArea = null;
     this._viewArea = null;
+
+    this._revisionGraph = null;
 }
 NoteViewer.prototype.show = function(editMode) {
     var lthis = this;
@@ -85,6 +90,13 @@ NoteViewer.prototype.show = function(editMode) {
         .appendTo(this._container);
     this._buttonSave = $('<button class="btn btn-primary" style="float: right;">Save</button>')
         .click(function() { lthis._saveChanges(); })
+        .appendTo(this._container);
+    this._buttonRevisionGraph = $('<button class="btn" style="float: right;" data-toggle="button">Revisions</button>')
+        .click(function() { lthis._toggleRevisionGraph(); })
+        .appendTo(this._container);
+
+    this._revisionGraphArea = $('<div/>')
+        .hide()
         .appendTo(this._container);
 
     this._textArea = $('<textarea style="width: 100%; height: 800px; margin-top: 10px;"></textarea>')
@@ -160,11 +172,149 @@ NoteViewer.prototype._saveChanges = function() {
 NoteViewer.prototype._cancelChanges = function() {
     this._toViewMode();
 }
+NoteViewer.prototype._toggleRevisionGraph = function() {
+    var lthis = this;
+    if (this._revisionGraph === null) {
+        this._revisionGraph = new RevisionGraph(this._note, this._revisionGraphArea);
+        this._revisionGraphArea.show('slow', function() {
+            lthis._revisionGraph.redraw();
+        });
+    } else {
+        this._revisionGraphArea.toggle('slow');
+    }
+}
+
+function RevisionGraph(note, container) {
+    this._note = note;
+    this._revisions = null;
+    this._revisionPositions = null;
+    this._container = container;
+    this._canvas = $('<canvas style="width: 500px; height: 100px;"></canvas>')
+        .appendTo(this._container);
+    this._update();
+}
+RevisionGraph.prototype._update = function() {
+    var lthis = this;
+    dbInterface.getRevisionMetadata(this._note.getID())
+        .fail(function(err) { NoteBrowser.showError("Error loading revisions: " + err); })
+        .done(function(revs) {
+            lthis._revisions = revs;
+            lthis._updateHierarchy();
+            /* XXX is it safe to draw now? (the width is not yet fixed) */
+            lthis.redraw();
+        });
+}
+RevisionGraph.prototype._getRoot = function() {
+    var id = this._note.getHeadRevisionID();
+    while (this._revisions[id].parents.length > 0)
+        id = this._revisions[id].parents[0];
+    return id;
+}
+RevisionGraph.prototype._updateHierarchy = function() {
+    var root = this._getRoot();
+    var children = {};
+    for (var id in this._revisions)
+        children[id] = [];
+    for (var id in this._revisions) {
+        this._revisions[id].parents.forEach(function(p) {
+            children[p].push(id);
+        });
+    }
+
+    this._revisionPositions = {};
+    var queue = {};
+    queue[root] = 1;
+    var x = 0;
+    var cont = true;
+
+    while (cont) {
+        cont = false;
+        var nextQueue = {};
+        var thisColumn = [];
+        for (var r in queue) {
+            if (this._allParentsArePositioned(r)) {
+                thisColumn.push(r);
+                for (var i = 0; i < children[r].length; i ++) {
+                    nextQueue[children[r][i]] = 1;
+                    cont = true;
+                }
+            } else {
+                nextQueue[r] = 1;
+                cont = true;
+            } 
+        }
+        queue = nextQueue;
+
+        thisColumn.sort();
+        for (var i = 0; i < thisColumn.length; i ++)
+            this._revisionPositions[thisColumn[i]] = [x, i - thisColumn.length / 2];
+
+        x ++;
+    }
+}
+RevisionGraph.prototype._allParentsArePositioned = function(revId) {
+    var r = this._revisions[revId];
+    for (var i = 0; i < r.parents.length; i ++) {
+        if (!(r.parents[i] in this._revisionPositions))
+            return false;
+    }
+    return true;
+}
+RevisionGraph.prototype._getPosition = function(id) {
+    var x = this._revisionPositions[id][0] * 60 + 20;
+    var y = this._canvas[0].height / 2 + this._revisionPositions[id][1] * 30;
+    return [x, y];
+}
+RevisionGraph.prototype.redraw = function() {
+    this._canvas[0].width = this._canvas.width(); /* clear and set size */
+    var ctx = this._canvas[0].getContext('2d');
+
+    /* draw lines */
+    for (var id in this._revisions) {
+        var r = this._revisions[id];
+        var rPos = this._getPosition(id);
+
+        for (var k = 0; k < r.parents.length; k ++) {
+            var p = r.parents[k];
+            var pPos = this._getPosition(p);
+            ctx.beginPath();
+            ctx.lineWidth = 3.0;
+            ctx.moveTo(rPos[0], rPos[1]);
+            ctx.lineTo(pPos[0], pPos[1]);
+            ctx.stroke();
+        }
+    }
+
+    /* draw circles with white border */
+    for (var id in this._revisions) {
+        var r = this._revisions[id];
+        var rPos = this._getPosition(id);
+        ctx.beginPath();
+        ctx.fillStyle = "#ffffff";
+        ctx.arc(rPos[0], rPos[1], 7, 0, Math.PI * 2, true);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.beginPath();
+        if (r.revType === "create") {
+            ctx.fillStyle = "#00ff00";
+        } else if (r.revType === "auto merge") {
+            ctx.fillStyle = "#ffff00";
+        } else if (r.revType === "manual merge") {
+            ctx.fillStyle = "#ffff7f";
+        } else {
+            ctx.fillStyle = '#000000';
+        }
+        ctx.arc(rPos[0], rPos[1], 5, 0, Math.PI * 2, true);
+        ctx.closePath();
+        ctx.fill();
+    }
+}
 
 function DBInterface() {
     this._db = null;
     this._backendType = 'couch'; /* or pouch */
-    this._backendUrl = 'http://localhost:5984';
+    this._backendUrl = '';
 
     var lthis = this;
     window.setTimeout(function() {
@@ -212,11 +362,9 @@ DBInterface.prototype.getAllNoteTitles = function() {
     if (this._backendType === 'couch') {
         this._db.view('default/notesByTitle', {
             success: function(res) {
-                var notes = [];
-                res.rows.forEach(function(row) {
-                    notes.push(Note.fromDBObject(row.doc));
-                });
-                d.resolve(notes);
+                d.resolve(res.rows.map(function(row) {
+                    return Note.fromDBObject(row.doc);
+                }));
             },
             error: function(err) {
                 d.reject("Database error: " + err.error + " (" + err.reason + ")");
@@ -231,11 +379,9 @@ DBInterface.prototype.getAllNoteTitles = function() {
                 d.reject("Database error: " + err.error + " (" + err.reason + ")");
                 return;
             }
-            var notes = [];
-            res.rows.forEach(function(row) {
-                notes.push({id: row.id, title: row.key});
-            });
-            d.resolve(notes);
+            d.resolve(res.rows.map(function(row) {
+                return {id: row.id, title: row.key};
+            }));
         });
     }
     return d.promise();
@@ -280,17 +426,43 @@ DBInterface.prototype.getRevisionParents = function(revisionIDs) {
     if (this._backendType === 'couch') {
         this._db.view('default/parentRevision', {
             success: function(res) {
-                var parents = [];
-                res.rows.forEach(function(row) {
-                    parents.push(row.value);
-                });
-                d.resolve(parents);
+                d.resolve(res.rows.map(function(row) {
+                    return row.value;
+                }));
             },
             error: function(err) {
                 d.reject("Database error: " + err.error + " (" + err.reason + ")");
             },
             reduce: false,
             keys: revisionIDs
+        });
+    } else {
+        /* TODO */
+    }
+    return d.promise();
+
+}
+DBInterface.prototype.getRevisionMetadata = function(noteID) {
+    if (!this._db)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+
+    var d = $.Deferred();
+    if (this._backendType === 'couch') {
+        this._db.view('default/revisionMetadata', {
+            success: function(res) {
+                var revs = {};
+                res.rows.forEach(function(row) {
+                    revs[row.value._id] = row.value;
+                });
+                d.resolve(revs);
+            },
+            error: function(err) {
+                d.reject("Database error: " + err.error + " (" + err.reason + ")");
+            },
+            reduce: false,
+            key: noteID
         });
     } else {
         /* TODO */
@@ -409,6 +581,9 @@ Note.prototype.getHeadRevision = function() {
     } else {
         return NoteRevision.get(lthis._headRev);
     }
+}
+Note.prototype.getHeadRevisionID = function() {
+    return this._headRev;
 }
 Note.prototype._save = function() {
     var lthis = this;
@@ -617,6 +792,7 @@ NoteRevision.createNew = function createNew(noteID, text, author, date, revType,
         .pipe(NoteRevision._fromDBObject, function(err) { return err; }).promise();
 }
 
+/* TODO use some view that retrieves all metadata for all revisions */
 function FindCommonAncestor(revA, revB) {
     var ancestorsA = {};
     var ancestorsB = {};
