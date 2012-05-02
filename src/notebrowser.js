@@ -8,6 +8,7 @@ function NoteBrowser() {
     var lthis = this;
     window.setTimeout(function() {
         lthis._noteList = new NoteList();
+        lthis._syncTargetList = new SyncTargetList();
         lthis._init();
     }, 10);
 }
@@ -36,6 +37,33 @@ NoteBrowser.prototype._init = function() {
                 lthis.currentNoteID.set(note.getID());
             });
     });
+    $('#newSyncButton').click(function() {
+        /* TODO improve this */
+        var name = prompt("Name");
+        if (!name) return;
+        var url = prompt("URL");
+        if (!url) return;
+
+        SyncTarget.create(name, url)
+            .fail(function(err) { noteBrowser.showError(err); });
+    });
+    dbInterface.on('ready', function() {
+        dbInterface.getAllSyncTargets()
+            .done(function(targets) {
+                $('#syncTargetButtons').empty();
+                targets.forEach(function(t) {
+                    $('<li/>')
+                        .append($('<a href="#"/>')
+                            .text(t.getName())
+                            .click(function(e) {
+                                lthis.syncWith(t);
+                                e.preventDefault();
+                                return true;
+                            }))
+                        .appendTo('#syncTargetButtons');
+                });
+            });
+    });
 }
 NoteBrowser.prototype.showError = function(message) {
     $('<div class="alert alert-error"><a class="close" data-dismiss="alert" href="#">&times;</a></div>')
@@ -56,6 +84,9 @@ NoteBrowser.prototype._showNote = function(id) {
             lthis.currentNoteID.set(note.getID());
         })
         .fail(function(err) { lthis.showError(err); });
+}
+NoteBrowser.prototype.syncWith = function(target) {
+
 }
 
 /* TODO Try to use events for errors */
@@ -442,6 +473,31 @@ DBInterface.prototype.getAllNoteTitles = function() {
     }
     return d.promise();
 }
+DBInterface.prototype.getAllSyncTargets = function() {
+    if (!this._db)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+
+    var d = $.Deferred();
+    if (this._backendType === 'couch') {
+        this._db.view('default/syncTargets', {
+            success: function(res) {
+                d.resolve(res.rows.map(function(row) {
+                    return SyncTarget.fromDBObject(row.doc);
+                }));
+            },
+            error: function(err) {
+                d.reject("Database error: " + err.error + " (" + err.reason + ")");
+            },
+            reduce: false,
+            include_docs: true
+        });
+    } else {
+        /* TODO */
+    }
+    return d.promise();
+}
 DBInterface.prototype._getDoc = function(id) {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
@@ -563,6 +619,28 @@ DBInterface.prototype.saveDoc = function(doc) {
 }
 addEvents(DBInterface, ['ready']);
 
+function SyncTargetList() {
+    var lthis = this;
+    /* TODO use database changes feed */
+    dbInterface.on('ready', function() { lthis.update(); });
+}
+SyncTargetList.prototype.update = function() {
+    var lthis = this;
+
+    $('#syncTableBody').empty();
+    dbInterface.getAllSyncTargets()
+        .done(function(targets) {
+            targets.forEach(function(target) {
+                $('<tr/>')
+                    .append($('<td/>').text(target.getName()))
+                    .append($('<td/>').text(target.getURL()))
+                    .appendTo('#syncTableBody');
+            });
+        })
+        .fail(function(err) {
+            noteBrowser.showError(err);
+        });
+}
 
 function NoteList() {
     /* TODO search */
@@ -670,7 +748,7 @@ Note.prototype._save = function() {
 }
 Note.prototype.save = function(data) {
     var lthis = this;
-    return NoteRevision.createNew(this._id, data.text, data.author || null, data.date || (new Date()),
+    return NoteRevision.create(this._id, data.text, data.author || null, data.date || (new Date()),
                         data.revType || "edit", data.parents || [this._headRev])
         .pipe(function(nr) {
             return lthis._updateToRevision(nr._id, nr);
@@ -787,7 +865,7 @@ NoteRevision.prototype.createMergedRevision = function(otherRev) {
                         m = new Merge(textParent, textB, textA);
                     }
                     textMerged = m.getMergedText();
-                    return NoteRevision.createNew(lthis._note, textMerged, null, new Date(), "auto merge",
+                    return NoteRevision.create(lthis._note, textMerged, null, new Date(), "auto merge",
                                           [lthis.getID(), otherRev.getID()]);
                 });
         });
@@ -833,7 +911,7 @@ NoteRevision.get = function get(id) {
     return dbInterface.getNoteRevision(id).pipe(NoteRevision._fromDBObject,
                     function(err) { return err; });
 }
-NoteRevision.createNew = function createNew(noteID, text, author, date, revType, parents) {
+NoteRevision.create = function create(noteID, text, author, date, revType, parents) {
     var doc = {
         type: "noteRevision",
         note: noteID,
@@ -890,6 +968,34 @@ function FindCommonAncestor(note, revA, revB) {
 
             return $.Deferred().reject("No common parent found.").promise();
         });
+}
+
+function SyncTarget() {
+    this._id = null;
+    this._rev = null;
+    this._name = null;
+    this._url = null;
+}
+SyncTarget.prototype.getID = function() {
+    return this._id;
+}
+SyncTarget.prototype.getName = function() {
+    return this._name;
+}
+SyncTarget.prototype.getURL = function() {
+    return this._url;
+}
+SyncTarget.create = function(name, url) {
+    return dbInterface.saveDoc({type: "syncTarget", name: name, url: url})
+        .pipe(function(doc) { return SyncTarget.fromDBObject(doc); });
+}
+SyncTarget.fromDBObject = function(doc) {
+    var t = new SyncTarget();
+    t._id = doc._id;
+    t._rev = doc._rev;
+    t._name = doc.name;
+    t._url = doc.url;
+    return t;
 }
 
 noteBrowser = new NoteBrowser();
