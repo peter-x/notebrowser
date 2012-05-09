@@ -1,3 +1,68 @@
+/* Simple JavaScript Inheritance
+ * By John Resig http://ejohn.org/
+ * MIT Licensed.
+ */
+// Inspired by base2 and Prototype
+var Class = (function(){
+  var initializing = false, fnTest = /xyz/.test(function(){xyz;}) ? /\b_super\b/ : /.*/;
+  // The base Class implementation (does nothing)
+  var Class = function(){};
+  
+  // Create a new Class that inherits from this class
+  Class.extend = function(prop) {
+    var _super = this.prototype;
+    
+    // Instantiate a base class (but only create the instance,
+    // don't run the init constructor)
+    initializing = true;
+    var prototype = new this();
+    initializing = false;
+    
+    // Copy the properties over onto the new prototype
+    for (var name in prop) {
+      // Check if we're overwriting an existing function
+      prototype[name] = typeof prop[name] == "function" && 
+        typeof _super[name] == "function" && fnTest.test(prop[name]) ?
+        (function(name, fn){
+          return function() {
+            var tmp = this._super;
+            
+            // Add a new ._super() method that is the same method
+            // but on the super-class
+            this._super = _super[name];
+            
+            // The method only need to be bound temporarily, so we
+            // remove it when we're done executing
+            var ret = fn.apply(this, arguments);        
+            this._super = tmp;
+            
+            return ret;
+          };
+        })(name, prop[name]) :
+        prop[name];
+    }
+    
+    // The dummy class constructor
+    function Class() {
+      // All construction is actually done in the init method
+      if ( !initializing && this._init )
+        this._init.apply(this, arguments);
+    }
+    
+    // Populate our constructed prototype object
+    Class.prototype = prototype;
+    
+    // Enforce the constructor to be what we expect
+    Class.prototype.constructor = Class;
+
+    // And make this class extendable
+    Class.extend = arguments.callee;
+    
+    return Class;
+  };
+  return Class;
+})();
+
 /** Makes the specified class events-aware, i.e. adds
  * the functions on(event, handler), off(event, handler)
  * and _trigger(event, ...)
@@ -64,6 +129,175 @@ LiveValue.prototype = {
 
 }
 addEvents(LiveValue, ['changed']);
+
+/* TODO check if this works */
+function HashTable(arg) {
+    if (arg) {
+        for (var i = 0; i < arg.length; i ++)
+            this[arg[i]] = null;
+    }
+}
+/* use as set */
+HashTable.prototype.insert = function(key) {
+    this[key] = null;
+}
+HashTable.prototype.remove = function(key) {
+    delete this[key];
+}
+HashTable.prototype.keys = function() {
+    return $.map(this, function(value, key) { return key; });
+}
+HashTable.prototype.values = function() {
+    return $.map(this, function(value, key) { return value; });
+}
+HashTable.prototype.set = function() {
+    return new HashTable(this.keys());
+}
+
+var DeferredSynchronizer = function(args) {
+   var length = args.length,
+        errors = {},
+        count = length,
+        deferred = $.Deferred();
+
+    if (length == 0)
+        deferred.resolveWith(deferred, [], []);
+
+    function resolveFunc(i) {
+        return function(value) {
+            args[i] = arguments.length > 1 ? [].slice.call(arguments, 0) : value;
+            if (--count === 0) {
+                console.log("resolving synchronizer");
+                deferred.resolveWith(deferred, args, errors);
+            }
+        };
+    }
+    function rejectFunc(i) {
+        return function(value) {
+            errors[i] = arguments.length > 1 ? [].slice.call(arguments, 0) : value;
+            args[i] = null;
+            if (--count === 0) {
+                console.log("resolving synchronizer");
+                deferred.resolveWith(deferred, args, errors);
+            }
+        };
+    }
+    /* TODO progress */
+    for (var i = 0; i < args.length; i ++) {
+        args[i].promise().then(resolveFunc(i), rejectFunc(i));
+    }
+    return deferred.promise();
+}
+
+var DBObject = Class.extend({
+    _init: function(id) {
+        this._dbObj = null;
+
+        this._constructorPromise = null;
+
+        if (id === undefined) {
+            /* new object, extend this part */
+            this._dbObj = {};
+            this._constructorPromise = $.when(this);
+        } else if (typeof(id) == 'object') {
+            /* dircetly passed database object */
+            this._dbObj = {};
+            this._setDBObj(id);
+            this._constructorPromise = $.when(this);
+        } else {
+            var lthis = this;
+            this._constructorPromise = dbInterface.getDoc(id).pipe(function(dbObj) {
+                lthis._dbObj = {};
+                lthis._setDBObj(dbObj);
+                return lthis;
+            });
+        }
+    },
+    getID: function() {
+        return this._dbObj._id;
+    },
+    getConstructorPromise: function() {
+        return this._constructorPromise;
+    },
+    /* to be overwritten */
+    _setDBObj: function(dbObj) {
+        if ('_id' in dbObj && '_rev' in dbObj) {
+            this._dbObj = dbObj;
+        } else {
+            throw new Error("Invalid database object.");
+        }
+    },
+    /* modifier is function that takes a copy of this._dbObj and returns
+     * modified db object (or promise),
+     * changes only take effect after saving,
+     * object can already be changed during conflict resolution */
+    _save: function(modifier) {
+        var lthis = this;
+
+        modifier = modifier || function(dbObj) { return dbObj; };
+
+        var dbObjCopy = $.extend(true, {}, this._dbObj);
+
+        return $.when(modifier(dbObjCopy)).pipe(function(data) {
+            return dbInterface.saveDoc(data).pipe(function(res) {
+                try {
+                    lthis._setDBObj(res);
+                } catch(e) {
+                    return $.Deferred().reject(e.message).promise();
+                }
+                return lthis;
+            }, function(err, conflict) {
+                if (conflict) {
+                    return dbInterface.getDoc(lthis.getID()).pipe(function(currentDBObj) {
+                        try {
+                            lthis._setDBObj(currentDBObj);
+                            return lthis._save(modifier);
+                        } catch(e) {
+                            return e.message;
+                        }
+                    });
+                } else {
+                    return err;
+                }
+            });
+        });
+    },
+    _setAndSave: function(attr, value) {
+        return this._save(function(dbObj) {
+            dbObj[attr] = value;
+            return dbObj;
+        });
+    }
+});
+
+var ObjectBag = function(objects) {
+    this._objects = {};
+    if (objects !== undefined) {
+        objects.forEach(function(obj) { this._objects[obj.getID()] = obj; });
+    }
+}
+ObjectBag.prototype.idList = function() {
+    return $.map(this._objects, function(v, k) { return k; });
+}
+ObjectBag.prototype.objectList = function() {
+    return $.map(this._objects, function(v, k) { return v; });
+}
+ObjectBag.prototype.insert = function(obj, id) {
+    if (id === undefined) id = obj.getID();
+    this._objects[id] = obj;
+}
+ObjectBag.prototype.hasID = function(id) {
+    return id in this._objects;
+}
+ObjectBag.prototype.get = function(id) {
+    return this._objects[id];
+}
+ObjectBag.prototype.each = function(callback) {
+    return $.each(this._objects, callback);
+}
+ObjectBag.prototype.map = function(callback) {
+    return $.map(this._objects, callback);
+}
 
 var MD5 = (function() {
 /*
