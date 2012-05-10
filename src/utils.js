@@ -202,13 +202,13 @@ var DBObject = Class.extend({
         } else if (typeof(id) == 'object') {
             /* dircetly passed database object */
             this._dbObj = {};
-            this._setDBObj(id);
+            this.setDBObj(id);
             this._constructorPromise = $.when(this);
         } else {
             var lthis = this;
             this._constructorPromise = dbInterface.getDoc(id).pipe(function(dbObj) {
                 lthis._dbObj = {};
-                lthis._setDBObj(dbObj);
+                lthis.setDBObj(dbObj);
                 return lthis;
             });
         }
@@ -220,7 +220,7 @@ var DBObject = Class.extend({
         return this._constructorPromise;
     },
     /* to be overwritten */
-    _setDBObj: function(dbObj) {
+    setDBObj: function(dbObj) {
         if ('_id' in dbObj && '_rev' in dbObj) {
             this._dbObj = dbObj;
         } else {
@@ -241,7 +241,7 @@ var DBObject = Class.extend({
         return $.when(modifier(dbObjCopy)).pipe(function(data) {
             return dbInterface.saveDoc(data).pipe(function(res) {
                 try {
-                    lthis._setDBObj(res);
+                    lthis.setDBObj(res);
                 } catch(e) {
                     return $.Deferred().reject(e.message).promise();
                 }
@@ -250,7 +250,7 @@ var DBObject = Class.extend({
                 if (conflict) {
                     return dbInterface.getDoc(lthis.getID()).pipe(function(currentDBObj) {
                         try {
-                            lthis._setDBObj(currentDBObj);
+                            lthis.setDBObj(currentDBObj);
                             return lthis._save(modifier);
                         } catch(e) {
                             return e.message;

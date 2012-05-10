@@ -8,6 +8,8 @@ $(function() {
 function NoteBrowser() {
     this.currentNoteID = new LiveValue(null);
 
+    this._noteViewer = null;
+
     var lthis = this;
     window.setTimeout(function() {
         lthis._noteList = new NoteList();
@@ -31,12 +33,15 @@ NoteBrowser.prototype._init = function() {
     dbInterface.on('ready', checkHash);
 
     $('#newNoteButton').click(function() {
-        Note.create({text: '# New Note\n'})
+        Note.create('# New Note\n')
             .fail(function(err) { lthis.showError(err); })
             .done(function(note) {
-                /* TODO ask the previous NoteViewer to remove itself */
-                var v = new NoteViewer(note);
-                v.show(true);
+                if (this._noteViewer !== null) {
+                    /* XXX allow it to ask the user to save or not */
+                    lthis._noteViewer.destroy();
+                }
+                lthis._noteViewer = new NoteViewer(note);
+                lthis._noteViewer.show(true);
                 lthis.currentNoteID.set(note.getID());
             });
     });
@@ -95,9 +100,12 @@ NoteBrowser.prototype.showNote = function(id, revision) {
     /* TODO also try to show the note by name */
     new Note(id).getConstructorPromise()
         .done(function(note) {
-            /* TODO ask the previous NoteViewer to remove itself */
-            var viewer = new NoteViewer(note, revision);
-            viewer.show();
+            if (lthis._noteViewer !== null) {
+                /* XXX allow it to ask the user to save or not */
+                lthis._noteViewer.destroy();
+            }
+            lthis._noteViewer = new NoteViewer(note, revision);
+            lthis._noteViewer.show();
             lthis.currentNoteID.set(note.getID());
         })
         .fail(function(err) { lthis.showError(err); });
@@ -122,6 +130,31 @@ function NoteViewer(note, revision) {
 
     this._syncTable = null;
     this._revisionGraph = null;
+
+    this._changeListener = null;
+    this._installChangeListener();
+}
+NoteViewer.prototype.destroy = function() {
+    if (this._revisionGraph !== null) {
+        this._revisionGraph.destroy();
+        this._revisionGraph = null;
+    }
+    dbInterface.off('change', this._changeListener);
+}
+NoteViewer.prototype._installChangeListener = function() {
+    var lthis = this;
+    if (this._changeListener === null) {
+        this._changeListener = dbInterface.on('change', function(doc) {
+            if (doc.type && doc.type == 'note' && doc._id && doc._id === lthis._note.getID()) {
+                if (lthis._editMode === false && lthis._revision === undefined) {
+                    lthis._note.setDBObj(doc);
+                    lthis.showRevision();
+                    /* XXX it should have its own listener */
+                    lthis._updateSyncTable();
+                }
+            }
+        });
+    }
 }
 NoteViewer.prototype.show = function(editMode) {
     var lthis = this;
@@ -165,10 +198,9 @@ NoteViewer.prototype.show = function(editMode) {
     this._container.appendTo('#noteArea');
 }
 NoteViewer.prototype.showRevision = function(rev) {
-    /* XXX tell notebrowser about this? */
     this._revision = rev;
     if (this._revisionGraph !== null)
-        this._revisionGraph.setCurrentRevision(rev);
+        this._revisionGraph.setCurrentRevision(rev === undefined ? this._note.getHeadRevisionID() : rev);
     this._toViewMode();
 }
 NoteViewer.prototype._toEditMode = function() {
@@ -218,6 +250,7 @@ NoteViewer.prototype._toViewMode = function() {
 NoteViewer.prototype._updateSyncTable = function() {
     var lthis = this;
     this._syncTableArea.empty();
+    /* XXX do we need to call this each time? */
     dbInterface.getAllSyncTargets()
         .done(function(targets) {
             var table = $('<table class="table table-striped table-bordered"><thead>' +
@@ -225,6 +258,7 @@ NoteViewer.prototype._updateSyncTable = function() {
                                 '</thead></table>');
             var tbody = $('<tbody/>').appendTo(table);
             targets.forEach(function(target) {
+                /* XXX update this */
                 var seq = lthis._note.getLocalSeq(target.getID());
                 var tr = $('<tr/>')
                     .append($('<td/>').text(target.getName()));
@@ -262,6 +296,7 @@ NoteViewer.prototype._saveChanges = function() {
         .done(function(val) {
             if (lthis._revisionGraph)
                 lthis._revisionGraph.setCurrentRevision(lthis._note.getHeadRevisionID());
+            /* XXX we will get double renderings because of the changes feed */
             lthis._toViewMode();
         })
         .fail(function(err) {
@@ -316,13 +351,13 @@ function RevisionGraph(noteViewer, note, revision, container) {
 }
 RevisionGraph.prototype.destroy = function() {
     /* TODO make sure this gets called */
-    dbInterface.off('changes', this._changeListener);
+    dbInterface.off('change', this._changeListener);
 }
 RevisionGraph.prototype._installChangeListener = function() {
     var lthis = this;
     if (lthis._changeListener === null) {
         lthis._changeListener = dbInterface.on('change', function(doc) {
-            if (doc.type && doc.type == 'noteRevision' && doc.note && doc.note == lthis._note.getID()) {
+            if (doc.type && doc.type == 'noteRevision' && doc.note && doc.note === lthis._note.getID()) {
                 lthis._revisions[doc._id] = doc;
                 lthis._updateHierarchy();
                 lthis.redraw();
@@ -1025,7 +1060,7 @@ var Note = DBObject.extend({
             this._dbObj.syncWith = {};
         }
     },
-    _setDBObj: function(dbObj) {
+    setDBObj: function(dbObj) {
         /* headRev can be null at the first save */
         if (dbObj.type === 'note' && typeof(dbObj.title) === 'string' && typeof(dbObj.syncWith) === 'object') {
             if (this._dbObj.headRev !== dbObj.headRev)
@@ -1149,10 +1184,10 @@ var Note = DBObject.extend({
     }
 });
 /* static */
-Note.create = function(data) {
+Note.create = function(text) {
     /* first create the note to obtain an ID, then save the initial revision */
     return (new Note())._save().pipe(function(n) {
-        return n.setText('', null, null, 'create', []);
+        return n.setText(text, null, null, 'create', []);
     });
 }
 Note.createWithExistingRevision = function(id, revObj, syncTarget) {
@@ -1182,7 +1217,7 @@ var NoteRevision = DBObject.extend({
             this._dbObj.text = null;
         }
     },
-    _setDBObj: function(dbObj) {
+    setDBObj: function(dbObj) {
         /* XXX check for sorted parents
          * XXX check for hash */
         if (dbObj.type === 'noteRevision' && typeof(dbObj.note) === 'string' &&
@@ -1210,7 +1245,7 @@ var NoteRevision = DBObject.extend({
         /* TODO improve this */
         var text = this.getText();
         if (!text) return "Note";
-        var m = text.match(/^#(.+)\n/);
+        var m = text.match(/^\s*#(.+)/);
         if (m) {
             return m[1].trim();
         } else {
@@ -1393,7 +1428,7 @@ var SyncTarget = DBObject.extend({
             this._dbObj.remoteSeq = 0;
         }
     },
-    _setDBObj: function(dbObj) {
+    setDBObj: function(dbObj) {
         if (dbObj.type === 'syncTarget' && typeof(dbObj.name) === 'string' &&
                     typeof(dbObj.url) === 'string' && 'remoteSeq' in dbObj) {
             this._super(dbObj);
