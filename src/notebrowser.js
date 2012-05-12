@@ -11,11 +11,25 @@ function NoteBrowser() {
     this._noteViewer = null;
 
     var lthis = this;
+    this._changeListener = null;
+
     window.setTimeout(function() {
+        lthis._changeListener = dbInterface.on('change', function(doc) {
+            if (doc.type && doc.type == 'syncTarget') {
+                lthis._updateSyncTargetButton(new SyncTarget(doc));
+            }
+        });
+
         lthis._noteList = new NoteList();
         lthis._syncTargetList = new SyncTargetList();
         lthis._init();
     }, 10);
+}
+NoteBrowser.prototype.destroy = function() {
+    if (this._changeListener !== null) {
+        dbInterface.off('change', this._changeListener);
+        this._changeListener = null;
+    }
 }
 NoteBrowser.prototype._init = function() {
     var lthis = this;
@@ -36,7 +50,7 @@ NoteBrowser.prototype._init = function() {
         Note.create('# New Note\n')
             .fail(function(err) { lthis.showError(err); })
             .done(function(note) {
-                if (this._noteViewer !== null) {
+                if (lthis._noteViewer !== null) {
                     /* XXX allow it to ask the user to save or not */
                     lthis._noteViewer.destroy();
                 }
@@ -56,27 +70,7 @@ NoteBrowser.prototype._init = function() {
             .fail(function(err) { noteBrowser.showError(err); });
     });
     dbInterface.on('ready', function() {
-        dbInterface.getAllSyncTargets()
-            .done(function(targets) {
-                $('#syncTargetButtons').empty();
-                targets.forEach(function(t) {
-                    $('<li/>')
-                        .append($('<a href="#"/>')
-                            .text(t.getName())
-                            .click(function(e) {
-                                t.doSync()
-                                    .done(function() {
-                                        noteBrowser.showInfo("Synchronized with " + t.getName());
-                                    })
-                                    .fail(function(e) {
-                                        noteBrowser.showError("Error synchronizing with " + t.getName() + ": " + e);
-                                    });
-                                e.preventDefault();
-                                return true;
-                            }))
-                        .appendTo('#syncTargetButtons');
-                });
-            });
+        lthis._updateSyncTargetButtons();
     });
 }
 NoteBrowser.prototype.showError = function(message) {
@@ -92,6 +86,32 @@ NoteBrowser.prototype.showInfo = function(message) {
             .text(String(message)))
         .alert()
         .appendTo('#messageArea');
+}
+NoteBrowser.prototype._updateSyncTargetButtons = function() {
+    var lthis = this;
+    dbInterface.getAllSyncTargets().done(function(targets) {
+        targets.forEach(function(t) {
+            lthis._updateSyncTargetButton(t);
+        });
+    });
+}
+NoteBrowser.prototype._updateSyncTargetButton = function(target) {
+    $('#synctargetbutton_' + target.getID(), '#syncTargetButtons').remove();
+    $('<li id="synctargetbutton_' + target.getID() + '"/>')
+        .append($('<a href="#"/>')
+            .text(target.getName())
+            .click(function(e) {
+                target.doSync()
+                    .done(function() {
+                        noteBrowser.showInfo("Synchronized with " + target.getName());
+                    })
+                    .fail(function(e) {
+                        noteBrowser.showError("Error synchronizing with " + target.getName() + ": " + e);
+                    });
+                e.preventDefault();
+                return true;
+            }))
+        .appendTo('#syncTargetButtons');
 }
 NoteBrowser.prototype.showNote = function(id, revision) {
     /* TODO update location hash */
@@ -554,22 +574,12 @@ RevisionGraph.prototype.setCurrentRevision = function(revision) {
     this.redraw();
 }
 
-function DBInterface() {
-    this._db = null;
-    this._backendType = 'couch'; /* or pouch */
-    this._dbName = null;
+var DBInterface = (function() {
 
-    var lthis = this;
-    window.setTimeout(function() {
-        if (lthis._backendType === 'couch') {
-            lthis._dbName = unescape(document.location.href).split('/')[3];
-            lthis._initCouch();
-        } else {
-            lthis._initPouch();
-        }
-    }, 10);
+
+function PouchDB(dbName) {
 }
-DBInterface.prototype._initPouch = function() {
+PouchDB.prototype._ini = function() {
     var lthis = this;
     new Pouch('idb://notebrowser', function(err, db) {
         if (err) {
@@ -581,7 +591,63 @@ DBInterface.prototype._initPouch = function() {
         lthis._trigger('ready');
     });
 }
-DBInterface.prototype._initCouch = function() {
+PouchDB.prototype.getAllNoteTitles = function() {
+    /* TODO */
+    var queryFun = function(doc) { if (doc.type === 'note') emit(doc.title, null); };
+    this._db.query(queryFun, null, function(err, res) {
+        if (err) {
+            d.reject("Database error: " + err.error + " (" + err.reason + ")");
+            return;
+        }
+        d.resolve(res.rows.map(function(row) {
+            return {id: row.id, title: row.key};
+        }));
+    });
+}
+PouchDB.prototype.getDoc = function(id) {
+    if (!this._db)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var d = $.Deferred();
+    this._db.get(id, function(err, doc) {
+        if (err) {
+            d.reject("Database error: " + err.error + " (" + err.reason + ")");
+        } else {
+            d.resolve(doc);
+        }
+    });
+    return d.promise();
+}
+PouchDB.prototype.saveDoc = function(doc) {
+    if (!this._db)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var d = $.Deferred();
+    this._db.post(note, function(err, res) {
+        if (err) {
+            d.reject("Database error: " + err.error + " (" + err.reason + ")");
+        } else {
+            doc._id = res.id;
+            doc._rev = res.rev;
+            /* TODO conflict */
+            d.resolve(doc);
+        }
+    });
+    return d.promise();
+}
+
+function CouchDB() {
+    this._db = null;
+    this._dbName = null;
+
+    var lthis = this;
+    window.setTimeout(function() {
+        lthis._dbName = unescape(document.location.href).split('/')[3];
+        lthis._init();
+    }, 10);
+}
+
+CouchDB.prototype._init = function() {
     var lthis = this;
     $.couch.urlPrefix = '';
     var db = $.couch.db(this._dbName);
@@ -592,260 +658,140 @@ DBInterface.prototype._initCouch = function() {
         lthis._trigger('ready');
     }});
 }
-DBInterface.prototype._registerChangesFeed = function(updateSeq) {
+CouchDB.prototype._registerChangesFeed = function(updateSeq) {
     if (!this._db)
         return;
     
     var lthis = this;
-    if (this._backendType === 'couch') {
-        this._db.changes(updateSeq, {include_docs: true})
-            .onChange(function(res) {
-                res.results.forEach(function(result) {
-                    lthis._trigger('change', result.doc, result.changes, res.last_seq);
-                });
+    this._db.changes(updateSeq, {include_docs: true})
+        .onChange(function(res) {
+            res.results.forEach(function(result) {
+                lthis._trigger('change', result.doc, result.changes, res.last_seq);
             });
-    } else {
-        /* TODO */
-    }
+        });
 }
-DBInterface.prototype.determineMissingRevisions = function(objectsWithRevs) {
-    if (!this._db)
-        /* TODO use $.when() (also in other places) */
-        return $.Deferred().reject("Not connected to database.").promise();
-    
-    var lthis = this;
-    if (this._backendType === 'couch') {
-        var ajaxOpts = {type: 'GET',
-                        contentType: 'application/json',
-                        dataType: 'json',
-                        accept: 'application/json',
-                        cache: !$.browser.msie};
-        return $.ajax($.extend(ajaxOpts, {
-                            type: 'POST',
-                            url: '/' + lthis._dbName + '/_missing_revs',
-                            data: JSON.stringify(objectsWithRevs)}))
-            .pipe(null, function(req, error) {
-                return "Error determining revisions missing on local serer: " + error;
-            });
-    } else {
-        /* TODO */
-    }
-}
-DBInterface.prototype.determineAvailableObjects = function(keys) {
+CouchDB.prototype.determineAvailableNoteRevisions = function(keys) {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
     
-    var lthis = this;
-    if (this._backendType === 'couch') {
-        var ajaxOpts = {type: 'GET',
-                        contentType: 'application/json',
-                        dataType: 'json',
-                        accept: 'application/json',
-                        cache: !$.browser.msie};
-        return $.ajax($.extend(ajaxOpts, {
-                            type: 'POST',
-                            url: '/' + this._dbName + '/_all_docs',
-                            processData: false,
-                            data: JSON.stringify({keys: keys, include_docs: false})}))
-            .pipe(function(res) {
-                var available = {};
-                res.rows.forEach(function(row) {
-                    if (!('error' in row)) available[row.key] = 1;
-                });
-                return available;
-            }, function(req, error) {
-                return "Error determining objects available on local serer: " + error;
+    var ajaxOpts = {type: 'GET',
+                    contentType: 'application/json',
+                    dataType: 'json',
+                    accept: 'application/json',
+                    cache: !$.browser.msie};
+    return $.ajax($.extend(ajaxOpts, {
+                        type: 'POST',
+                        url: '/' + this._dbName + '/_all_docs',
+                        processData: false,
+                        data: JSON.stringify({keys: keys, include_docs: false})}))
+        .pipe(function(res) {
+            var available = {};
+            res.rows.forEach(function(row) {
+                if (!('error' in row)) available[row.key] = 1;
             });
-    } else {
-        /* TODO */
-    }
+            return available;
+        }, function(req, error) {
+            return "Error determining objects available on local serer: " + error;
+        });
 }
-DBInterface.prototype.getAllNoteTitles = function() {
+CouchDB.prototype.getAllNoteTitles = function() {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
-
-    var lthis = this;
 
     var d = $.Deferred();
-    if (this._backendType === 'couch') {
-        this._db.view('default/notesByTitle', {
-            success: function(res) {
-                d.resolve(res.rows.map(function(row) {
-                    return new Note(row.doc);
-                }));
-            },
-            error: function(err) {
-                d.reject("Database error: " + err);
-            },
-            reduce: false,
-            include_docs: true
-        });
-    } else {
-        var queryFun = function(doc) { if (doc.type === 'note') emit(doc.title, null); };
-        this._db.query(queryFun, null, function(err, res) {
-            if (err) {
-                d.reject("Database error: " + err.error + " (" + err.reason + ")");
-                return;
-            }
+    this._db.view('default/notesByTitle', {
+        success: function(res) {
             d.resolve(res.rows.map(function(row) {
-                return {id: row.id, title: row.key};
+                return new Note(row.doc);
             }));
-        });
-    }
+        },
+        error: function(err) {
+            d.reject("Database error: " + err);
+        },
+        reduce: false,
+        include_docs: true
+    });
     return d.promise();
 }
-DBInterface.prototype.getNotesToSync = function(syncTarget) {
+CouchDB.prototype.getNotesToSync = function(syncTarget) {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
 
-    var lthis = this;
-
     var d = $.Deferred();
-    if (this._backendType === 'couch') {
-        this._db.view('default/notesToSync', {
-            success: function(res) {
-                d.resolve(res.rows.map(function(row) {
-                    return new Note(row.doc);
-                }));
-            },
-            error: function(err) {
-                d.reject("Database error: " + err);
-            },
-            reduce: false,
-            key: syncTarget,
-            include_docs: true
-        });
-    } else {
-        /* TODO */
-    }
+    this._db.view('default/notesToSync', {
+        success: function(res) {
+            d.resolve(res.rows.map(function(row) {
+                return new Note(row.doc);
+            }));
+        },
+        error: function(err) {
+            d.reject("Database error: " + err);
+        },
+        reduce: false,
+        key: syncTarget,
+        include_docs: true
+    });
     return d.promise();
 }
-DBInterface.prototype.getAllSyncTargets = function() {
+CouchDB.prototype.getAllSyncTargets = function() {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
 
-    var lthis = this;
-
     var d = $.Deferred();
-    if (this._backendType === 'couch') {
-        this._db.view('default/syncTargets', {
-            success: function(res) {
-                d.resolve(res.rows.map(function(row) {
-                    return new SyncTarget(row.doc);
-                }));
-            },
-            error: function(err) {
-                d.reject("Database error: " + err);
-            },
-            reduce: false,
-            include_docs: true
-        });
-    } else {
-        /* TODO */
-    }
+    this._db.view('default/syncTargets', {
+        success: function(res) {
+            d.resolve(res.rows.map(function(row) {
+                return new SyncTarget(row.doc);
+            }));
+        },
+        error: function(err) {
+            d.reject("Database error: " + err);
+        },
+        reduce: false,
+        include_docs: true
+    });
     return d.promise();
 }
-DBInterface.prototype.getDoc = function(id) {
+CouchDB.prototype.getDoc = function(id) {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
 
-    var lthis = this;
-
     var d = $.Deferred();
-    if (this._backendType === 'couch') {
-        this._db.openDoc(id, {
-            /* XXX check if the id we got matches the id we requested */
-            success: function(doc) { d.resolve(doc); },
-            error: function(err) { d.reject("Database error: " + err); }
-        });
-    } else {
-        this._db.get(id, function(err, doc) {
-            if (err) {
-                d.reject("Database error: " + err.error + " (" + err.reason + ")");
-            } else {
-                d.resolve(doc);
-            }
-        });
-    }
+    this._db.openDoc(id, {
+        /* XXX check if the id we got matches the id we requested */
+        success: function(doc) { d.resolve(doc); },
+        error: function(err) { d.reject("Database error: " + err); }
+    });
     return d.promise();
 }
-DBInterface.prototype.getDocs = function(ids) {
+CouchDB.prototype.getRevisionMetadata = function(noteID) {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
 
-    var lthis = this;
-
     var d = $.Deferred();
-    if (this._backendType === 'couch') {
-        this._db.allDocs({keys: ids,
-            success: function(res) { d.resolve(res); },
-            error: function(err) { d.reject("Database error: " + err); }
-        });
+    var opts = {
+        success: function(res) {
+            var revs = {};
+            res.rows.forEach(function(row) {
+                revs[row.value._id] = row.value;
+            });
+            d.resolve(revs, res.update_seq);
+        },
+        error: function(err) {
+            d.reject("Database error: " + err);
+        },
+        update_seq: true,
+        reduce: false};
+    if ($.isArray(noteID)) {
+        opts.keys = noteID;
     } else {
-        /* TODO */
+        opts.key = noteID;
     }
-    return d.promise();
-}
-DBInterface.prototype.getRevisionParents = function(revisionIDs) {
-    if (!this._db)
-        return $.Deferred().reject("Not connected to database.").promise();
-
-    var lthis = this;
-
-    var d = $.Deferred();
-    if (this._backendType === 'couch') {
-        this._db.view('default/parentRevision', {
-            success: function(res) {
-                d.resolve(res.rows.map(function(row) {
-                    return row.value;
-                }));
-            },
-            error: function(err) {
-                d.reject("Database error: " + err);
-            },
-            reduce: false,
-            keys: revisionIDs
-        });
-    } else {
-        /* TODO */
-    }
+    this._db.view('default/revisionMetadata', opts);
     return d.promise();
 
 }
-DBInterface.prototype.getRevisionMetadata = function(noteID) {
-    if (!this._db)
-        return $.Deferred().reject("Not connected to database.").promise();
-
-    var lthis = this;
-
-    var d = $.Deferred();
-    if (this._backendType === 'couch') {
-        var opts = {
-            success: function(res) {
-                var revs = {};
-                res.rows.forEach(function(row) {
-                    revs[row.value._id] = row.value;
-                });
-                d.resolve(revs, res.update_seq);
-            },
-            error: function(err) {
-                d.reject("Database error: " + err);
-            },
-            update_seq: true,
-            reduce: false};
-        if ($.isArray(noteID)) {
-            opts.keys = noteID;
-        } else {
-            opts.key = noteID;
-        }
-        this._db.view('default/revisionMetadata', opts);
-    } else {
-        /* TODO */
-    }
-    return d.promise();
-
-}
-DBInterface.prototype.changedRevisions = function(noteID, since) {
+CouchDB.prototype.changedRevisions = function(noteID, since) {
     var ajaxOpts = {type: 'GET',
                     dataType: 'json',
                     accept: 'application/json',
@@ -867,73 +813,287 @@ DBInterface.prototype.changedRevisions = function(noteID, since) {
             return "Error determining changed revisions on local serer: " + error;
         });
 }
-DBInterface.prototype.saveDocs = function(docs) {
+CouchDB.prototype.saveDocs = function(docs) {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
 
     var d = $.Deferred();
-    if (this._backendType === 'couch') {
-        this._db.bulkSave({docs: docs}, {
-            success: function(res) {
-                d.resolve(res);
-            },
-            error: function(err) {
-                if (err == '409') {
-                    /* conflict */
-                    d.reject(err, true);
-                } else {
-                    d.reject(err);
-                }
-            }
-        });
-    } else {
-        /* TODO */
-    }
-    return d.promise();
-}
-DBInterface.prototype.saveDoc = function(doc) {
-    if (!this._db)
-        return $.Deferred().reject("Not connected to database.").promise();
-
-    var d = $.Deferred();
-    if (this._backendType === 'couch') {
-        this._db.saveDoc(doc, {
-            success: function(res) {
-                doc._id = res.id;
-                doc._rev = res.rev;
-                d.resolve(doc);
-            },
-            error: function(err) {
-                if (err == '409') {
-                    /* conflict */
-                    d.reject(err, true);
-                } else {
-                    d.reject(err);
-                }
-            }
-        });
-    } else {
-        this._db.post(note, function(err, res) {
-            if (err) {
-                d.reject("Database error: " + err.error + " (" + err.reason + ")");
+    this._db.bulkSave({docs: docs}, {
+        success: function(res) {
+            d.resolve(res);
+        },
+        error: function(err) {
+            if (err == '409') {
+                /* conflict */
+                d.reject(err, true);
             } else {
-                doc._id = res.id;
-                doc._rev = res.rev;
-                /* TODO conflict */
-                d.resolve(doc);
+                d.reject(err);
             }
-        });
-    }
+        }
+    });
     return d.promise();
 }
-addEvents(DBInterface, ['ready', 'change']);
+CouchDB.prototype.saveDoc = function(doc) {
+    if (!this._db)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var d = $.Deferred();
+    this._db.saveDoc(doc, {
+        success: function(res) {
+            doc._id = res.id;
+            doc._rev = res.rev;
+            d.resolve(doc);
+        },
+        error: function(err) {
+            if (err == '409') {
+                /* conflict */
+                d.reject(err, true);
+            } else {
+                d.reject(err);
+            }
+        }
+    });
+    return d.promise();
+}
+addEvents(CouchDB, ['ready', 'change']);
+
+function InMemoryDB() {
+    this._changeLog = null;
+    this._initialized = false;
+
+    this._notes = null;
+    this._noteRevisions = null;
+    this._syncTargets = null;
+    this._revisionsForNote = null;
+    this._syncTargetNotes = null;
+
+    var lthis = this;
+    window.setTimeout(function() {
+        /* XXX fetch data */
+        lthis._initialized = true;
+        lthis._changeLog = [];
+        lthis._notes = {};
+        lthis._noteRevisions = {};
+        lthis._syncTargets = {};
+        lthis._revisionsForNote = {};
+        lthis._syncTargetNotes = {};
+        lthis._trigger('ready');
+    }, 10);
+}
+InMemoryDB.prototype.determineAvailableNoteRevisions = function(keys) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+    var available = {};
+    keys.forEach(function(k) {
+        if (k in lthis._noteRevisions) available[k] = 1;
+    });
+
+    return $.when(available);
+}
+InMemoryDB.prototype.getAllNoteTitles = function() {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var notes = $.map(this._notes, function(n) { return n; });
+    notes.sort(function(n1, n2) { return n1.title > n2.title; });
+    return $.when($.map(notes, function(n) { return new Note(n);}));
+}
+InMemoryDB.prototype.getNotesToSync = function(syncTargetID) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var notes = this._syncTargetNotes[syncTargetID];
+    return $.when($.map(notes, function(n) { return new Note(n); }));
+}
+InMemoryDB.prototype.getAllSyncTargets = function() {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var targets = $.map(this._syncTargets, function(n) { return n; });
+    targets.sort(function(t1, t2) { return t1.name > t2.name; });
+    return $.when($.map(targets, function(t) { return new SyncTarget(t);}));
+}
+InMemoryDB.prototype._getDoc = function(id) {
+    if (id in this._notes)
+        return this._notes[id];
+    if (id in this._noteRevisions)
+        return this._noteRevisions[id];
+    if (id in this._syncTargets)
+        return this._syncTargets[id];
+    return undefined;
+}
+InMemoryDB.prototype.getDoc = function(id) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var doc = this._getDoc(id);
+    if (doc === undefined) {
+        return $.Deferred().reject("Document not found.").promise();
+    } else {
+        return $.when(doc);
+    }
+}
+InMemoryDB.prototype.getRevisionMetadata = function(noteID) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    /* contains more data than needed, but it would take more time to filter
+     * it*/
+    return $.when(this._revisionsForNote[noteID]);
+}
+InMemoryDB.prototype.changedRevisions = function(noteID, since) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    /* XXX correct to start at "since"? */
+    var revs = [];
+    for (var i = since; i < this._changeLog.length; i ++) {
+        var id = this._changeLog[i];
+        if (id in this._noteRevisions) {
+            var r = this._noteRevisions[id];
+            if (r.note === noteID)
+                revs.push(r);
+        }
+    }
+    return $.when({lastSeq: this._changeLog.length - 1,
+                   revisions: revs});
+}
+InMemoryDB.prototype._saveDoc = function(doc) {
+    var lthis = this;
+
+    if (!('_id' in doc))
+        doc._id = this._genID();
+    if (!('_rev' in doc))
+        doc._rev = '0-x';
+
+    doc._rev = this._getIncrementedRev(doc);
+
+    var olddoc = this._getDoc(doc._id);
+    if (olddoc !== undefined) {
+        if (olddoc._rev === doc._rev) {
+            /* no conflict, no save */
+            /* XXX change notification? */
+            return 0;
+        } else if (!this._olderRev(olddoc._rev, doc._rev)) {
+            return -1;
+        }
+    }
+
+    if (doc.type == 'note') {
+        this._notes[doc._id] = doc;
+        if (olddoc !== undefined) {
+            $.each(olddoc.syncWith, function(syncTargetID) {
+                delete lthis._syncTargetNotes[syncTargetID][olddoc._id];
+            });
+        }
+        $.each(doc.syncWith, function(syncTargetID) {
+            if (!(syncTargetID in lthis._syncTargetNotes))
+                lthis._syncTargetNotes[syncTargetID] = {};
+            lthis._syncTargetNotes[syncTargetID][doc._id] = doc;
+        });
+    } else if (doc.type == 'noteRevision') {
+        this._noteRevisions[doc._id] = doc;
+        /* we assume that the referenced note does never change */
+        if (!(doc.note in this._revisionsForNote))
+            this._revisionsForNote[doc.note] = {};
+        this._revisionsForNote[doc.note][doc._id] = doc;
+    } else if (doc.type === 'syncTarget') {
+        this._syncTargets[doc._id] = doc;
+    } else {
+        return -2;
+    }
+
+    this._changeLog.push(doc._id);
+
+    /* TODO only trigger it after promise resolution? */
+    this._trigger('change', doc);
+
+    return 1;
+}
+InMemoryDB.prototype.saveDoc = function(doc) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var res = this._saveDoc(doc);
+    if (res >= 0)
+        return $.when(doc);
+    if (res == -1)
+        return $.Deferred().reject("Conflict.", true).promise();
+    if (res == -2)
+        return $.Deferred().reject("Invalid document type.").promise();
+    return $.Deferred().reject("Database error.").promise();
+}
+InMemoryDB.prototype.saveDocs = function(docs) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    for (var i = 0; i < docs.length; i ++) {
+        this.saveDoc(docs[i]);
+    }
+
+    /* XXX return value is currently ignored */
+    return $.when("Documents saved.");
+}
+InMemoryDB.prototype._genID = function() {
+    var id = '';
+    for (var i = 0; i < 32; i += 4) {
+        var part = Math.floor((Math.random() * 0x10000)).toString(16);
+        id += '0000'.substr(part.length) + part.substr(0, 4);
+    }
+    return id;
+}
+InMemoryDB.prototype._getIncrementedRev = function(doc) {
+    var copy = $.extend(true, {}, doc);
+    var num = (copy._rev.split('-')[0] - 0) + 1;
+
+    /* XXX use some normal form */
+    return num + '-' + MD5.hex_md5(JSON.stringify(copy));
+}
+InMemoryDB.prototype._olderRev = function(reva, revb) {
+    var partsa = reva.split('-');
+    var partsb = revb.split('-');
+    return (partsa[0] < partsb[0]);
+}
+addEvents(InMemoryDB, ['ready', 'change']);
+
+/* XXX better check if couchdb is there */
+
+var url = document.location.href;
+if (url.match(/file:\/\//)) {
+    return InMemoryDB; /* XXX or pouchdb if possible */
+} else if (url.match(/\/_design\//)) {
+    return CouchDB;
+} else {
+    return InMemoryDB;
+}
+
+})();
+
 
 function SyncTargetList() {
     this._changeListener = null;
 
     var lthis = this;
-    /* TODO use database changes feed */
     dbInterface.on('ready', function() { lthis.update(); });
+    this._changeListener = dbInterface.on('change', function(doc) {
+        if (doc.type && doc.type === 'syncTarget') {
+            lthis._updateListEntry(new SyncTarget(doc));
+        }
+    });
+}
+SyncTargetList.prototype.destroy = function() {
+    if (this._changeListener !== null)
+        dbInterface.off('change', this._changeListener);
+    this._changeListener = null;
+}
+SyncTargetList.prototype._updateListEntry = function(target) {
+    $('#synctarget_' + target.getID(), '#syncTableBody').remove();
+    $('<tr id="synctarget_' + target.getID() + '"/>')
+                    .append($('<td/>').text(target.getName()))
+                    .append($('<td/>').text(target.getURL()))
+                    .appendTo('#syncTableBody');
 }
 SyncTargetList.prototype.update = function() {
     var lthis = this;
@@ -942,10 +1102,7 @@ SyncTargetList.prototype.update = function() {
     dbInterface.getAllSyncTargets()
         .done(function(targets) {
             targets.forEach(function(target) {
-                $('<tr/>')
-                    .append($('<td/>').text(target.getName()))
-                    .append($('<td/>').text(target.getURL()))
-                    .appendTo('#syncTableBody');
+                lthis._updateListEntry(target);
             });
         })
         .fail(function(err) {
@@ -964,7 +1121,6 @@ function NoteList() {
     noteBrowser.currentNoteID.getLive(function(val) {
         lthis._setListHilight(val);
     });
-    /* TODO use database changes feed */
     dbInterface.on('ready', function() { lthis.update(); });
 }
 NoteList.prototype.destroy = function() {
@@ -1198,6 +1354,7 @@ Note.createWithExistingRevision = function(id, revObj, syncTarget) {
         } else {
             dbObj._id = id;
             dbObj.headRev = revObj.getID();
+            dbObj.title = revObj.getTitle();
             dbObj.syncWith[syncTarget] = 0;
             return dbObj;
         }
@@ -1465,7 +1622,7 @@ var SyncTarget = DBObject.extend({
             });
 
             /* XXX actually we should ask for the ids that are not missing... */
-            return dbInterface.determineAvailableObjects(objs.idList()).pipe(function(availableObjs) {
+            return dbInterface.determineAvailableNoteRevisions(objs.idList()).pipe(function(availableObjs) {
                 var objectsToFetch = [];
                 for (var i = 0; i < remoteChanges.results.length; i ++) {
                     var id = remoteChanges.results[i].id;
@@ -1493,7 +1650,7 @@ var SyncTarget = DBObject.extend({
                 remoteObjects.insert(o);
                 o.getParents().forEach(function(p) { occuringParents.insert(1, p); });
             }
-            return dbInterface.determineAvailableObjects(occuringParents.idList()).pipe(function(availableParents) {
+            return dbInterface.determineAvailableNoteRevisions(occuringParents.idList()).pipe(function(availableParents) {
                     var checkedObjects = new ObjectBag();
                     function objectAndParentsExist(id) {
                         if (checkedObjects.hasID(id) || id in availableParents) return true;
