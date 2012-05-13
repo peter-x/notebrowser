@@ -8,7 +8,7 @@ $(function() {
 function NoteBrowser() {
     this.currentNoteID = new LiveValue(null);
 
-    this._noteViewer = null;
+    this._noteViewer = new NoteViewer();
 
     var lthis = this;
     this._changeListener = null;
@@ -50,12 +50,7 @@ NoteBrowser.prototype._init = function() {
         Note.create('# New Note\n')
             .fail(function(err) { lthis.showError(err); })
             .done(function(note) {
-                if (lthis._noteViewer !== null) {
-                    /* XXX allow it to ask the user to save or not */
-                    lthis._noteViewer.destroy();
-                }
-                lthis._noteViewer = new NoteViewer(note);
-                lthis._noteViewer.show(true);
+                lthis._noteViewer.showEditNote(note);
                 lthis.currentNoteID.set(note.getID());
             });
     });
@@ -116,24 +111,19 @@ NoteBrowser.prototype._updateSyncTargetButton = function(target) {
 NoteBrowser.prototype.showNote = function(id, revision) {
     /* TODO update location hash */
     var lthis = this;
-    $('#noteArea').empty();
+    /* TODO hide previous note */
     /* TODO also try to show the note by name */
     new Note(id).getConstructorPromise()
         .done(function(note) {
-            if (lthis._noteViewer !== null) {
-                /* XXX allow it to ask the user to save or not */
-                lthis._noteViewer.destroy();
-            }
-            lthis._noteViewer = new NoteViewer(note, revision);
-            lthis._noteViewer.show();
+            lthis._noteViewer.showNote(note, revision);
             lthis.currentNoteID.set(note.getID());
         })
         .fail(function(err) { lthis.showError(err); });
 }
 
-function NoteViewer(note, revision) {
-    this._note = note;
-    this._revision = revision;
+function NoteViewer() {
+    this._note = null;
+    this._revision = undefined;
 
     this._editMode = false;
 
@@ -145,20 +135,33 @@ function NoteViewer(note, revision) {
 
     this._revisionGraphArea = null;
     this._syncTableArea = null;
-    this._textArea = null;
+    this._editArea = null;
     this._viewArea = null;
+
+    this._showdown = new Showdown.converter();
 
     this._syncTable = null;
     this._revisionGraph = null;
 
+    this._findUIElements();
+
+    this._noteText = '';
+    this._landRenderDuration = 500;
+    this._lastRawText = '';
+    this._renderTimer = null;
+
+    var lthis = this;
     this._changeListener = null;
-    this._installChangeListener();
+    window.setTimeout(function() {
+        lthis._installChangeListener();
+    }, 10);
 }
 NoteViewer.prototype.destroy = function() {
     if (this._revisionGraph !== null) {
         this._revisionGraph.destroy();
         this._revisionGraph = null;
     }
+    /* XXX remove all the handlers */
     dbInterface.off('change', this._changeListener);
 }
 NoteViewer.prototype._installChangeListener = function() {
@@ -176,46 +179,83 @@ NoteViewer.prototype._installChangeListener = function() {
         });
     }
 }
-NoteViewer.prototype.show = function(editMode) {
+NoteViewer.prototype._findUIElements = function() {
     var lthis = this;
 
-    this._container = $('<div/>');
-    this._buttonEdit = $('<button class="btn"><i class="icon-edit"/> Edit</button>')
-        .click(function() { lthis._toEditMode(); })
-        .appendTo(this._container);
-    this._buttonCancel = $('<button class="btn">Cancel</button>')
-        .click(function() { lthis._cancelChanges(); })
-        .appendTo(this._container);
-    this._buttonSave = $('<button class="btn btn-primary">Save</button>')
-        .click(function() { lthis._saveChanges(); })
-        .appendTo(this._container);
-    this._buttonRevisionGraph = $('<button class="btn" data-toggle="button">Revisions</button>')
-        .click(function() { lthis._toggleRevisionGraph(); })
-        .appendTo(this._container);
+    this._buttonEdit = $('#viewEditButton')
+        .click(function() { lthis._toEditMode(); });
+    this._buttonCancel = $('#viewCancelButton')
+        .click(function() { lthis._cancelChanges(); });
+    this._buttonSave = $('#viewSaveButton')
+        .click(function() { lthis._saveChanges(); });
+    this._buttonRevisionGraph = $('#viewRevisionGraphButton')
+        .click(function() { lthis._toggleRevisionGraph(); });
 
-    this._revisionGraphArea = $('<div/>')
-        .hide()
-        .appendTo(this._container);
-    
-    this._syncTableArea = $('<div/>')
-        .appendTo(this._container);
+    this._revisionGraphArea = $('#revisionGraphArea')
+        .hide();
 
-    this._textArea = $('<textarea style="width: 100%; height: 800px; margin-top: 10px;"></textarea>')
-        .appendTo(this._container);
+    this._syncTableArea = $('#syncTableArea');
 
-    this._viewArea = $('<div/>')
-        .appendTo(this._container);
+    this._editArea = $('#editArea');
+    this._viewArea = $('#viewArea');
 
-    this._updateSyncTable();
+    /* XXX remove those again */
+    $(window).keyup(function() { lthis._textChanged(); });
+    $('textarea', this._editArea).keyup(function() { lthis._textChanged(); });
+    window.setInterval(function() {
+        if (lthis._editMode && $('textarea', lthis._editArea).val() !== lthis._lastRawText)
+            lthis._textChanged();
+    }, 1000);
+}
+NoteViewer.prototype._textChanged = function() {
+    if (!this._editMode)
+        return;
 
-    if (editMode) {
-        this._toEditMode();
-    } else {
-        this._toViewMode();
+    if (this._renderTimer) {
+        window.clearTimeout(this._renderTimer);
+        this._renderTimer = null;
     }
 
-    $('#noteArea').empty();
-    this._container.appendTo('#noteArea');
+    var lthis = this;
+    this._renderTimer = window.setTimeout(function() { lthis._doRender(true); },
+                      Math.min(this._lastRenderDuration, 2000));
+}
+NoteViewer.prototype._doRender = function(math) {
+    this._renderTimer = null;
+
+    var start = (new Date()) - 0;
+
+    var text;
+    if (this._editMode) {
+        text = $('textarea', this._editArea).val();
+    } else {
+        text = this._noteText;
+    }
+    this._lastRawText = text;
+
+    this._viewArea
+        .empty()
+        .append(this._showdown.makeHtml(text));
+    if (math)
+        MathJax.Hub.Queue(["Typeset", MathJax.Hub, this._viewArea[0]]);
+
+    this._lastRenderDuration = (new Date()) - start;
+}
+NoteViewer.prototype.showNote = function(note, revision) {
+    this._note = note;
+    this._revision = revision;
+    if (this._revisionGraph !== null)
+        this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision);
+    this._updateSyncTable();
+    this._toViewMode();
+}
+NoteViewer.prototype.showEditNote = function(note, revision) {
+    this._note = note;
+    this._revision = revision;
+    if (this._revisionGraph !== null)
+        this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision);
+    this._updateSyncTable();
+    this._toEditMode();
 }
 NoteViewer.prototype.showRevision = function(rev) {
     this._revision = rev;
@@ -233,11 +273,12 @@ NoteViewer.prototype._toEditMode = function() {
             lthis._buttonSave.show();
             lthis._buttonCancel.show();
             lthis._viewArea
-                .hide()
-                .empty();
-            lthis._textArea.val(text);
-            lthis._textArea.show();
-            lthis._textArea.focus();
+                .removeClass('span9')
+                .addClass('span4');
+            lthis._editArea.show();
+            $('textarea', lthis._editArea)
+                .val(text)
+                .focus();
         })
         .fail(function(err) {
             noteBrowser.showError(err);
@@ -249,18 +290,18 @@ NoteViewer.prototype._toViewMode = function() {
     this._note.getText(this._revision)
         .done(function(text) {
             lthis._editMode = false;
+            lthis._noteText = text;
+
             lthis._buttonEdit.show();
             lthis._buttonSave.hide();
             lthis._buttonCancel.hide();
 
-            var c = new Showdown.converter();
             lthis._viewArea
                 .empty()
-                .append(c.makeHtml(text))
-                .show();
-            MathJax.Hub.Queue(["Typeset", MathJax.Hub, lthis._viewArea[0]]);
-            lthis._textArea.empty();
-            lthis._textArea.hide();
+                .removeClass('span4')
+                .addClass('span9');
+            lthis._editArea.hide();
+            lthis._doRender(true);
         })
         .fail(function(err) {
             noteBrowser.showError(err);
@@ -296,6 +337,7 @@ NoteViewer.prototype._updateSyncTable = function() {
                 }
                 tr.appendTo(tbody);
             });
+            lthis._syncTableArea.empty();
             table.appendTo(lthis._syncTableArea);
         })
         .fail(function(err) {
@@ -307,12 +349,12 @@ NoteViewer.prototype._saveChanges = function() {
         if (!confirm("You are possibly saving an old revision. This will overwrite changes."))
             return;
     }
-    var text = this._textArea.val();
+    var text = $('textarea', this._editArea).val();
 
     var lthis = this;
     /* XXX if we are viewing an old revision, then mark it as manual
      * merge and adjust the parents appropriately. */
-    this._note.setText(this._textArea.val())
+    this._note.setText($('textarea', this._editArea).val())
         .done(function(val) {
             if (lthis._revisionGraph)
                 lthis._revisionGraph.setCurrentRevision(lthis._note.getHeadRevisionID());
