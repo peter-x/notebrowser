@@ -867,18 +867,27 @@ function InMemoryDB() {
     this._revisionsForNote = null;
     this._syncTargetNotes = null;
 
+    this._lastAutoSave = -1;
+
     var lthis = this;
     window.setTimeout(function() {
-        /* XXX fetch data */
-        lthis._initialized = true;
-        lthis._changeLog = [];
-        lthis._notes = {};
-        lthis._noteRevisions = {};
-        lthis._syncTargets = {};
-        lthis._revisionsForNote = {};
-        lthis._syncTargetNotes = {};
+        var noteBrowserData = window.noteBrowserData;
+        if (!noteBrowserData)
+            noteBrowserData = {notes: {}, noteRevisions: {}, syncTargets: {}, changeLog: []};
+        try {
+            lthis._import(noteBrowserData);
+            lthis._initialized = true;
+            noteBrowserData = window.noteBrowserData = null;
+        } catch (e) {
+            noteBrowser.showError("Error loading local data: " + e.message);
+            return;
+        }
         lthis._trigger('ready');
     }, 10);
+    this._autoSaveInterval = window.setInterval(function() {
+        if (lthis._initialized)
+            lthis._autoSave();
+    }, 5000);
 }
 InMemoryDB.prototype.determineAvailableNoteRevisions = function(keys) {
     if (!this._initialized)
@@ -1055,6 +1064,69 @@ InMemoryDB.prototype._olderRev = function(reva, revb) {
     var partsa = reva.split('-');
     var partsb = revb.split('-');
     return (partsa[0] < partsb[0]);
+}
+InMemoryDB.prototype._export = function() {
+    var data = {notes: this._notes,
+                   noteRevisions: this._noteRevisions,
+                   syncTargets: this._syncTargets,
+                   changeLog: this._changeLog};
+    return JSON.stringify(data);
+}
+InMemoryDB.prototype._import = function(data) {
+    var revisionsForNote = {};
+    var syncTargetNotes = {};
+
+    $.each(data.notes, function(id, note) {
+        $.each(note.syncWith, function(syncTargetID) {
+            if (!(syncTargetID in syncTargetNotes))
+                syncTargetNotes[syncTargetID] = {};
+            syncTargetNotes[syncTargetID][note._id] = note;
+        });
+    });
+
+    $.each(data.noteRevisions, function(id, rev) {
+        if (!(rev.note in revisionsForNote))
+            revisionsForNote[rev.note] = {};
+        revisionsForNote[rev.note][rev._id] = rev;
+    });
+
+    this._notes = data.notes;
+    this._noteRevisions = data.noteRevisions;
+    this._syncTargets = data.syncTargets;
+
+    this._changeLog = data.changeLog;
+
+    this._revisionsForNote = revisionsForNote;
+    this._syncTargetNotes = syncTargetNotes;
+}
+InMemoryDB.prototype._autoSave = function() {
+    try {
+        netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
+    } catch (e) {
+        noteBrowser.showError("Permission to save files was denied. Please use Firefox to save notes.");
+        window.clearInterval(this._autoSaveInterval);
+        this._autoSaveInterval = null;
+        return;
+    }
+    if (this._lastAutoSave == this._changeLog.length)
+        return;
+    /* XXX detect if another window writes to this file */
+    var path = document.location.pathname.replace(/\/index.html$/, '');
+    var data = 'noteBrowserData = ' + this._export() + ';';
+
+    var file = Components.classes["@mozilla.org/file/local;1"]
+                    .createInstance(Components.interfaces.nsILocalFile);
+    file.initWithPath(path + '/data.jsonp');
+    if (!file.exists())
+        file.create(0, 0x01B4);
+    var outputStream = Components.classes["@mozilla.org/network/file-output-stream;1"]
+                    .createInstance(Components.interfaces.nsIFileOutputStream);
+    outputStream.init(file, 0x22, 0x04, null);
+
+    outputStream.write(data, data.length);
+    outputStream.close();
+
+    this._lastAutoSave = this._changeLog.length;
 }
 addEvents(InMemoryDB, ['ready', 'change']);
 
