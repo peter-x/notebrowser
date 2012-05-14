@@ -75,12 +75,13 @@ NoteBrowser.prototype.showError = function(message) {
         .alert()
         .appendTo('#messageArea');
 }
-NoteBrowser.prototype.showInfo = function(message) {
-    $('<div class="alert alert-info"><a class="close" data-dismiss="alert" href="#">&times;</a></div>')
-        .append($('<p/>')
-            .text(String(message)))
-        .alert()
-        .appendTo('#messageArea');
+NoteBrowser.prototype.showInfo = function(message, box) {
+    if (box === undefined)
+        box = $('<div class="alert alert-info"><a class="close" data-dismiss="alert" href="#">&times;</a></div>')
+            .alert()
+            .appendTo('#messageArea');
+    return box.append($('<p/>')
+            .text(String(message)));
 }
 NoteBrowser.prototype._updateSyncTargetButtons = function() {
     var lthis = this;
@@ -838,8 +839,6 @@ CouchDB.prototype.changedRevisions = function(noteID, since) {
                     dataType: 'json',
                     accept: 'application/json',
                     cache: !$.browser.msie};
-    /* XXX for testing */
-    since = 0;
     return $.ajax($.extend(ajaxOpts, {
                         url: '/' + this._dbName + '/_changes',
                         data: {filter: 'default/noteRevisions',
@@ -1647,8 +1646,6 @@ function RemoteCouchDB(url) {
                     cache: !$.browser.msie};
 }
 RemoteCouchDB.prototype.changedDocuments = function(since) {
-    /* XXX for testing */
-    since = 0;
     return $.ajax($.extend(this._ajaxOpts, {
                         url: this._url + '/_changes',
                         data: {since: since}}))
@@ -1718,13 +1715,24 @@ var SyncTarget = DBObject.extend({
     },
     doSync: function() {
         var lthis = this;
+        var messageBox = noteBrowser.showInfo("Synchronizing with " + this.getName());
 
         /* TODO different remote types */
         var remoteDB = new RemoteCouchDB(this.getURL());
 
+        if (!$.support.cors) {
+            try {
+                if (netscape.security.PrivilegeManager.enablePrivilege) {
+                    netscape.security.PrivilegeManager.enablePrivilege("UniversalBrowserRead");
+                }
+            } catch(e) {
+                noteBrowser.showError("Error enabling UniversalBrowserRead: " + e.message);
+            }
+        }
+
         /* TODO reformat the error */
 
-        console.log("Requesting changes since " + this.getRemoteSeq());
+        noteBrowser.showInfo("Requesting changes since " + this.getRemoteSeq(), messageBox);
         return remoteDB.changedDocuments(this.getRemoteSeq()).pipe(function(remoteChanges) {
             /* TODO make this robust, catch exceptions and report them */
             var objs = new ObjectBag();
@@ -1743,11 +1751,11 @@ var SyncTarget = DBObject.extend({
                     if (!(id in availableObjs))
                         objectsToFetch.push(id);
                 }
-                return lthis._fetchRevisions(remoteDB, objectsToFetch, remoteChanges.last_seq);
+                return lthis._fetchRevisions(remoteDB, objectsToFetch, remoteChanges.last_seq, messageBox);
             });
         });
     },
-    _fetchRevisions: function(remoteDB, ids, lastSeq) {
+    _fetchRevisions: function(remoteDB, ids, lastSeq, messageBox) {
         var lthis = this;
         /* TODO fetch them in batches */
         return remoteDB.getDocs(ids).pipe(function(objs) {
@@ -1779,17 +1787,16 @@ var SyncTarget = DBObject.extend({
                     remoteObjects.each(function(id, o) { 
                         if (!objectAndParentsExist(id)) {
                             /* XXX some error */
-                            console.log("Parent missing: " + id);
+                            noteBrowser.showInfo("Parent missing: " + id, messageBox);
                         }
                     });
 
                     /* XXX check if someone added a new root - is it really bad?
                      * we could modify the code to cope with multiple roots */
 
-                    console.log("Valid objects: " + checkedObjects.idList().length);
+                    noteBrowser.showInfo("Valid objects: " + checkedObjects.idList().length, messageBox);
                     var docList = checkedObjects.map(function(o) { return o.getDBObject(); });
                     return dbInterface.saveDocs(docList).pipe(function(res) {
-                            console.log(res);
                             /* TODO handle conflicts and save errors,
                              * update the objects? */
 
@@ -1812,18 +1819,18 @@ var SyncTarget = DBObject.extend({
 
                             /* TODO really do this in parallel? */
                             var processes = $.map(headRevisions, function(revisions, noteID) {
-                                return lthis._mergeHeadsAndUpdateDocuments(noteID, revisions);
+                                return lthis._mergeHeadsAndUpdateDocuments(noteID, revisions, messageBox);
                             });
                             processes.push(lthis._setRemoteSeq(lastSeq));
                             return DeferredSynchronizer(processes).pipe(function() {
                                 /* XXX errors? */
-                                return lthis._pushRevisions(checkedObjects);
+                                return lthis._pushRevisions(checkedObjects, messageBox);
                             });
                         });
                 });
         });
     },
-    _mergeHeadsAndUpdateDocuments: function(noteID, headRevisions) {
+    _mergeHeadsAndUpdateDocuments: function(noteID, headRevisions, messageBox) {
         var lthis = this;
         /* XXX for debugging */
         var merge = true;
@@ -1843,17 +1850,17 @@ var SyncTarget = DBObject.extend({
             if (note.getLocalSeq(lthis.getID()) === undefined) return 1;
             return note.mergeWithRevision(headRevisions[0]);
         }, function() {
-            console.log("Creating: " + noteID);
+            noteBrowser.showInfo("Creating: " + noteID, messageBox);
             return Note.createWithExistingRevision(noteID, headRevisions[0], lthis.getID());
         });
     },
-    _pushRevisions: function(revsToIgnore) {
+    _pushRevisions: function(revsToIgnore, messageBox) {
         var lthis = this;
-        console.log("Pushing objects to remote server.");
+        noteBrowser.showInfo("Pushing objects to remote server.", messageBox);
         return dbInterface.getNotesToSync(this.getID()).pipe(function(notes) {
             var revisionObjects = [];
             /* TODO really parallel? */
-            console.log("Sync notes: " + notes.length);
+            noteBrowser.showInfo("Sync notes: " + notes.length, messageBox);
             var processes = $.map(notes, function(note) {
                 var id = note.getID();
                 var seq = note.getLocalSeq(lthis.getID());
@@ -1867,7 +1874,7 @@ var SyncTarget = DBObject.extend({
             });
             return DeferredSynchronizer(processes).pipe(function() {
                 var remoteDB = new RemoteCouchDB(lthis.getURL());
-                console.log("Objs to push: " + revisionObjects.length);
+                noteBrowser.showInfo("Objs to push: " + revisionObjects.length, messageBox);
                 /* TODO we could have errors in some processes */
                 return remoteDB.bulkSave(revisionObjects);
             });

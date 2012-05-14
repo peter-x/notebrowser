@@ -167,7 +167,6 @@ var DeferredSynchronizer = function(args) {
         return function(value) {
             args[i] = arguments.length > 1 ? [].slice.call(arguments, 0) : value;
             if (--count === 0) {
-                console.log("resolving synchronizer");
                 deferred.resolveWith(deferred, args, errors);
             }
         };
@@ -177,7 +176,6 @@ var DeferredSynchronizer = function(args) {
             errors[i] = arguments.length > 1 ? [].slice.call(arguments, 0) : value;
             args[i] = null;
             if (--count === 0) {
-                console.log("resolving synchronizer");
                 deferred.resolveWith(deferred, args, errors);
             }
         };
