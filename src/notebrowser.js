@@ -169,6 +169,7 @@ NoteViewer.prototype._installChangeListener = function() {
     var lthis = this;
     if (this._changeListener === null) {
         this._changeListener = dbInterface.on('change', function(doc) {
+            if (lthis._note === null) return;
             if (doc.type && doc.type == 'note' && doc._id && doc._id === lthis._note.getID()) {
                 if (lthis._editMode === false && lthis._revision === undefined) {
                     lthis._note.setDBObj(doc);
@@ -1373,6 +1374,8 @@ var Note = DBObject.extend({
                         return $.Deferred().reject("Invalid revision object " + nr.getID()).promise();
                     return nr.getText();
                 });
+        } else if (this._dbObj.headRev === null) {
+            return $.when("");
         } else {
             return this.getHeadRevision().pipe(function(hr) {
                 return hr.getText();
