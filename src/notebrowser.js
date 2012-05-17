@@ -1141,23 +1141,30 @@ InMemoryDB.prototype._import = function(data) {
     this._syncTargetNotes = syncTargetNotes;
 }
 InMemoryDB.prototype._autoSave = function() {
+    /* XXX detect if another window writes to this file */
+    if (this._lastAutoSave == this._changeLog.length)
+        return;
+
+    var path = document.location.pathname.replace(/\/index.html$/, '') + '/data.jsonp';
+    var data = 'noteBrowserData = ' + this._export() + ';';
+
+    if (!this._autoSaveNetscape(path, data) && !this._autoSaveJava(path, data)) {
+        noteBrowser.showError("Unable to save data to local filesystem.");
+        window.clearInterval(this._autoSaveInterval);
+        this._autoSaveInterval = null;
+    } else {
+        this._lastAutoSave = this._changeLog.length;
+    }
+}
+InMemoryDB.prototype._autoSaveNetscape = function(path, data) {
     try {
         netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
     } catch (e) {
-        noteBrowser.showError("Permission to save files was denied. Please use Firefox to save notes.");
-        window.clearInterval(this._autoSaveInterval);
-        this._autoSaveInterval = null;
-        return;
+        return false;
     }
-    if (this._lastAutoSave == this._changeLog.length)
-        return;
-    /* XXX detect if another window writes to this file */
-    var path = document.location.pathname.replace(/\/index.html$/, '');
-    var data = 'noteBrowserData = ' + this._export() + ';';
-
     var file = Components.classes["@mozilla.org/file/local;1"]
                     .createInstance(Components.interfaces.nsILocalFile);
-    file.initWithPath(path + '/data.jsonp');
+    file.initWithPath(path);
     if (!file.exists())
         file.create(0, 0x01B4);
     var outputStream = Components.classes["@mozilla.org/network/file-output-stream;1"]
@@ -1167,7 +1174,22 @@ InMemoryDB.prototype._autoSave = function() {
     outputStream.write(data, data.length);
     outputStream.close();
 
-    this._lastAutoSave = this._changeLog.length;
+    return true;
+}
+InMemoryDB.prototype._autoSaveJava = function(path, data) {
+    if (!document.applets["TiddlySaver"]) {
+        /* XXX wait for initialization */
+        $(document.body).append('<applet style="position: absolute; left: -1px;" ' +
+                                'name="TiddlySaver" code="TiddlySaver.class" ' +
+                                'archive="TiddlySaver.jar" width="1" height="1"></applet>');
+    }
+
+    try {
+        console.log(data);
+        return document.applets["TiddlySaver"].saveFile(path, "UTF-8\0\0\0\0", data);
+    } catch (e) {
+    }
+    return false;
 }
 addEvents(InMemoryDB, ['ready', 'change']);
 
