@@ -1186,7 +1186,6 @@ InMemoryDB.prototype._autoSaveJava = function(path, data) {
     }
 
     try {
-        console.log(data);
         return document.applets["TiddlySaver"].saveFile(path, "UTF-8\0\0\0\0", data);
     } catch (e) {
     }
@@ -1250,6 +1249,7 @@ function NoteList() {
     /* TODO search */
 
     this._changeListener = null;
+    this._sortStyle = 'title';
 
     var lthis = this;
 
@@ -1258,6 +1258,20 @@ function NoteList() {
         lthis._setListHilight(val);
     });
     dbInterface.on('ready', function() { lthis.update(); });
+    $('#sortByTitle').click(function() {
+        lthis._sortStyle = 'title';
+        $('li', $('#sortByTitle').closest('ul')).removeClass('active');
+        $('#sortByTitle').closest('li').addClass('active');
+        lthis.update();
+        return false;
+    });
+    $('#sortByDate').click(function() {
+        lthis._sortStyle = 'date';
+        $('li', $('#sortByDate').closest('ul')).removeClass('active');
+        $('#sortByDate').closest('li').addClass('active');
+        lthis.update();
+        return false;
+    });
 }
 NoteList.prototype.destroy = function() {
     if (lthis._changeListener !== null)
@@ -1267,12 +1281,17 @@ NoteList.prototype.destroy = function() {
 NoteList.prototype.update = function() {
     var lthis = this;
 
-    $('#noteListStart ~ li').remove();
+    $('#noteList li').remove();
+    lthis._notes = {};
     /* TODO Add some "in progress" widget? Only remove shortly before update? */
     dbInterface.getAllNoteTitles()
         .done(function(notes) {
             notes.forEach(function(note) {
+                lthis._insertNote(note);
+                /* XXX this is a bit slow */
+                /*
                 lthis._getNoteLink(note.getID(), note.getTitle()).appendTo('#noteList');
+                */
             });
             lthis._setListHilight(noteBrowser.currentNoteID.get());
         })
@@ -1280,15 +1299,16 @@ NoteList.prototype.update = function() {
             noteBrowser.showError(err);
         });
 }
-NoteList.prototype._getNoteLink = function(id, title) {
-    return $('<li/>', {'data-noteid': id})
-        .append($('<a/>', {href: '#' + encodeURIComponent(id)})
-                .text(title));
+NoteList.prototype._getNoteLink = function(note, sortKey) {
+    return $('<li id="noteList_' + note.getID() + '"/>')
+        .data('sortKey', sortKey)
+        .append($('<a/>', {href: '#' + encodeURIComponent(note.getID())})
+                .text(note.getTitle()));
 }
 NoteList.prototype._setListHilight = function(id) {
-    $('#noteListStart ~ li').removeClass('active');
+    $('#noteList li').removeClass('active');
     /* XXX how to escape? */
-    $('#noteListStart ~ li[data-noteid="' + id  + '"]').addClass('active');
+    $('#noteList_' + id).addClass('active');
 }
 NoteList.prototype._installChangeListener = function() {
     var lthis = this;
@@ -1296,7 +1316,7 @@ NoteList.prototype._installChangeListener = function() {
         lthis._changeListener = dbInterface.on('change', function(doc) {
             if (doc.type && doc.type === 'note') {
                 var note = new Note(doc);
-                $('#noteListStart ~ li[data-noteid="' + note.getID() + '"]').remove();
+                lthis._removeNote(note);
                 lthis._insertNote(note);
 
                 var hilightID = noteBrowser.currentNoteID.get();
@@ -1306,28 +1326,108 @@ NoteList.prototype._installChangeListener = function() {
         });
     }
 }
-NoteList.prototype._insertNote = function(note) {
-    var title = note.getTitle();
-    var lis = $('#noteListStart ~ li');
-    var a = 0, b = lis.length;
+NoteList.prototype._dateToDayStr = function(date) {
+    /* XXX should be local timezone, and not as specified in date */
+    var year = date.getFullYear();
+    var month = date.getMonth() + 1;
+    var day = date.getDate();
+    if (isNaN(year)) {
+        return 'Unknown';
+    } else {
+        return year + '-' + (month < 10 ? '0' + month : month) +
+                      '-' + (day < 10 ? '0' + day : day);
+    }
+}
+NoteList.prototype._removeNote = function(note) {
+    delete this._notes[note.getID()];
+    /* XXX how to escape? */
+    $('#noteList_' + note.getID()).remove();
+}
+NoteList.prototype._findElementPosition = function(key, list, reversed) {
+    var a = 0, b = list.length;
     while (b - a > 1) {
         var m = Math.floor((a + b) / 2);
-        /* XXX which collation? */
-        if (title < $(lis[m]).text()) {
+        var keyThere = $(list[m]).data('sortKey');
+        if (key === keyThere)
+            return [0, m];
+        var cmp = (key < keyThere);
+        if (reversed) cmp = !cmp;
+
+        if (cmp) {
             b = m;
         } else {
             a = m;
         }
     }
-
-    var l = this._getNoteLink(note.getID(), title);
-    if (lis.length == 0) {
-        l.insertAfter('#noteListStart');
-    } else if (title < $(lis[a]).text()) {
-        l.insertBefore($(lis[a]));
+    if (list.length === 0) {
+        return [-2, 0];
     } else {
-        l.insertAfter($(lis[a]));
+        var keyThere = $(list[a]).data('sortKey');
+        if (key === keyThere)
+            return [0, a];
+        var cmp = key < keyThere;
+        if (reversed) cmp = !cmp;
+        if (cmp) {
+            return [-1, a];
+        } else {
+            return [1, a];
+        }
     }
+}
+NoteList.prototype._insertElement = function(element, listParent, list, reversed) {
+    var res = this._findElementPosition(element.data('sortKey'), list, reversed);
+    if (res[0] === -2) {
+        element.prependTo(listParent);
+        return 0;
+    } else if (res[0] === -1 || res[0] === 0) {
+        element.insertBefore($(list[res[1]]));
+        return -1;
+    } else {
+        element.insertAfter($(list[res[1]]));
+        return 1;
+    }
+}
+NoteList.prototype._insertNote = function(note) {
+    this._notes[note.getID()] = note;
+
+    if (this._sortStyle === 'title') {
+        var l = this._getNoteLink(note, note.getTitle());
+        this._insertElement(l, $('#noteList'), $('li', '#noteList'));
+    } else {
+        var date = this._dateToDayStr(note.getDate());
+        var headers = $('li[class=nav-header]', '#noteList');
+
+        var l = this._getNoteLink(note, note.getTitle());
+        var res = this._findElementPosition(date, headers, true);
+        var a = res[1];
+
+        if (res[0] === 0) {
+            var notes = $(headers[a]).nextUntil('li[class=nav-header]');
+            if (true || notes.length === 0) {
+                l.insertAfter(headers[a]);
+            } else {
+                this._insertElement(l, null, notes);
+            }
+        } else {
+            var header = $('<li class="nav-header"/>')
+                .data('sortKey', date)
+                .text(date);
+            if (res[0] === -2) {
+                header.appendTo('#noteList');
+            } else if (res[0] === -1) {
+                header.insertBefore(headers[a]);
+            } else {
+                if (a === headers.length - 1) {
+                    header.appendTo('#noteList');
+                } else {
+                    header.insertBefore(headers[a + 1]);
+                }
+            }
+            l.insertAfter(header);
+        }
+    }
+
+
     /* TODO find some nice effect */
     $('a', l)
         .css('color', 'white')
@@ -1342,19 +1442,23 @@ NoteList.prototype._insertNote = function(note) {
 var Note = DBObject.extend({
     _init: function(id) {
         this._title = null;
+        this._date = null;
         this._headRevObj = null;
 
         this._super(id);
         if (id === undefined) {
             this._dbObj.type = 'note';
             this._dbObj.title = '';
-            this._dbObj.headRev = null; /* should not be saved like that */
+            this._dbObj.date = null;
+            this._dbObj.headRev = null;
             this._dbObj.syncWith = {};
         }
     },
     setDBObj: function(dbObj) {
         /* headRev can be null at the first save */
-        if (dbObj.type === 'note' && typeof(dbObj.title) === 'string' && typeof(dbObj.syncWith) === 'object') {
+        if (dbObj.type === 'note' && typeof(dbObj.title) === 'string' &&
+                                     /*typeof(dbObj.date) === 'string' &&*/
+                                     typeof(dbObj.syncWith) === 'object') {
             if (this._dbObj.headRev !== dbObj.headRev)
                 this._headRevObj = null;
             this._super(dbObj);
@@ -1364,6 +1468,9 @@ var Note = DBObject.extend({
     },
     getTitle: function() {
         return this._dbObj.title;
+    },
+    getDate: function() {
+        return new Date(this._dbObj.date);
     },
     getText: function(revisionID) {
         var lthis = this;
@@ -1433,6 +1540,7 @@ var Note = DBObject.extend({
                 /* no conflict */
                 dbObj.headRev = revObj.getID();
                 dbObj.title = revObj.getTitle();
+                dbObj.date = revObj.getDate();
                 return dbObj;
             } else {
                 /* conflict */
@@ -1445,6 +1553,7 @@ var Note = DBObject.extend({
                         currentRev = newRevObj.getID();
                         dbObj.headRev = newRevObj.getID();
                         dbObj.title = newRevObj.getTitle();
+                        dbObj.date = revObj.getDate();
                         return dbObj;
                     });
                 });
@@ -1493,6 +1602,7 @@ Note.createWithExistingRevision = function(id, revObj, syncTarget) {
             dbObj._id = id;
             dbObj.headRev = revObj.getID();
             dbObj.title = revObj.getTitle();
+            dbObj.date = revObj.getDate();
             dbObj.syncWith[syncTarget] = 0;
             return dbObj;
         }
@@ -1533,6 +1643,9 @@ var NoteRevision = DBObject.extend({
     getText: function() {
         return this._dbObj.text;
     },
+    getDate: function() {
+        return this._dbObj.date;
+    },
     getParents: function() {
         return this._dbObj.parents; /* TODO copy? perhaps too expensive */
     },
@@ -1567,7 +1680,8 @@ var NoteRevision = DBObject.extend({
                     m = new Merge(textParent, textB, textA);
                 }
                 var textMerged = m.getMergedText();
-                return (new NoteRevision()).save(lthis.getNoteID(), textMerged, null, null,
+                var date = lthis.getDate() > otherRev.getDate() ? lthis.getDate() : otherRev.getDate();
+                return (new NoteRevision()).save(lthis.getNoteID(), textMerged, null, date,
                                                  "auto merge", [lthis.getID(), otherRev.getID()]);
             });
         });
