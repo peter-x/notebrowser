@@ -176,3 +176,34 @@ Merge.prototype.getMergedText = function getMergedText() {
     }
     return mergedText;
 }
+
+function MergeSets(setParent, setA, setB) {
+    var x;
+    var output = {};
+    for (x in setA) {
+        if (x in setB || !(x in setParent)) {
+            output[x] = 1;
+        }
+    }
+    for (x in setB) {
+        if (x in setA || !(x in setParent)) {
+            output[x] = 1;
+        }
+    }
+    return output;
+}
+
+function MergeSortedLists(listParent, listA, listB) {
+    function listToSet(list) {
+        var set = {};
+        list.forEach(function(x) { set[x] = 1; });
+        return set;
+    }
+    function setToSortedList(set) {
+        var list = $.map(set, function(v, k) { return k; });
+        return list.sort();
+    }
+    return setToSortedList(MergeSets(listToSet(listParent),
+                                     listToSet(listA),
+                                     listToSet(listB)));
+}

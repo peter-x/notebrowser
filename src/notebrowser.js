@@ -10,19 +10,39 @@ function NoteBrowser() {
 
     this._noteViewer = new NoteViewer();
 
+    this._notesByID = null;
+    this._notesByTitle = null;
+    this._notesByTag = null;
+
     var lthis = this;
     this._changeListener = null;
 
     window.setTimeout(function() {
         lthis._changeListener = dbInterface.on('change', function(doc) {
-            if (doc.type && doc.type == 'syncTarget') {
+            if (doc.type && doc.type === 'syncTarget') {
                 lthis._updateSyncTargetButton(new SyncTarget(doc));
+            } else if (doc.type && doc.type === 'note') {
+                lthis._removeNote(doc._id);
+                lthis._insertNote(new Note(doc));
             }
         });
+        dbInterface.on('ready', function() {
+            dbInterface.getAllNoteTitles()
+                .done(function(notes) {
+                    lthis._notesByID = {};
+                    lthis._notesByTitle = {};
+                    lthis._notesByTag = {};
+                    notes.forEach(function(note) { lthis._insertNote(note); });
 
-        lthis._noteList = new NoteList();
-        lthis._syncTargetList = new SyncTargetList();
-        lthis._init();
+                    lthis._noteList = new NoteList();
+                    lthis._syncTargetList = new SyncTargetList();
+
+                    lthis._init();
+                })
+                .fail(function(err) {
+                    noteBrowser.showError(err);
+                });
+        });
     }, 10);
 }
 NoteBrowser.prototype.destroy = function() {
@@ -31,20 +51,54 @@ NoteBrowser.prototype.destroy = function() {
         this._changeListener = null;
     }
 }
+NoteBrowser.prototype._insertNote = function(note) {
+    var lthis = this;
+    var id = note.getID();
+    var title = note.getTitle();
+
+    this._notesByID[id] = note;
+    if (!(title in this._notesByTitle))
+        this._notesByTitle[title] = {};
+    this._notesByTitle[title][id] = note;
+
+    note.getTags().forEach(function(tag) {
+        if (!(tag in lthis._notesByTag))
+            lthis._notesByTag[tag] = {};
+        lthis._notesByTag[tag][id] = note;
+    });
+}
+NoteBrowser.prototype._removeNote = function(id) {
+    var lthis = this;
+    if (!(id in this._notesByID)) return;
+
+    var note = this._notesByID[id];
+
+    note.getTags().forEach(function(tag) {
+        delete lthis._notesByTag[tag][id];
+    });
+    delete this._notesByTitle[note.getTitle()][id];
+    delete this._notesByID[id];
+}
 NoteBrowser.prototype._init = function() {
     var lthis = this;
     function checkHash() {
         var hash = document.location.hash;
         if (hash.length <= 1)
             return;
-        if ('#' + lthis._currentNoteId === hash)
-            return; /* TODO what about note titles? */
-        /* TODO change the hash back if the note was not found? */
-        lthis.showNote(hash.substr(1));
+        hash = hash.substr(1);
+        if (lthis.currentNoteID.get() === hash)
+            return;
+        var note = lthis.getNoteByID(hash) || lthis.getFirstNoteByTitle(hash);
+        if (note === undefined) {
+            document.location.hash = '#' + lthis.currentNoteID.get();
+            noteBrowser.showError("Note " + hash + " not found.");
+            return false;
+        }
+        lthis._showNote(note.getID());
     }
 
     $(window).on('hashchange', checkHash);
-    dbInterface.on('ready', checkHash);
+    checkHash();
 
     $('#newNoteButton').click(function() {
         Note.create('# New Note\n')
@@ -63,9 +117,6 @@ NoteBrowser.prototype._init = function() {
 
         SyncTarget.create(name, url)
             .fail(function(err) { noteBrowser.showError(err); });
-    });
-    dbInterface.on('ready', function() {
-        lthis._updateSyncTargetButtons();
     });
 }
 NoteBrowser.prototype.showError = function(message) {
@@ -109,17 +160,35 @@ NoteBrowser.prototype._updateSyncTargetButton = function(target) {
             }))
         .appendTo('#syncTargetButtons');
 }
-NoteBrowser.prototype.showNote = function(id, revision) {
-    /* TODO update location hash */
-    var lthis = this;
-    /* TODO hide previous note */
-    /* TODO also try to show the note by name */
-    new Note(id).getConstructorPromise()
-        .done(function(note) {
-            lthis._noteViewer.showNote(note, revision);
-            lthis.currentNoteID.set(note.getID());
-        })
-        .fail(function(err) { lthis.showError(err); });
+NoteBrowser.prototype.getNoteByID = function(id) {
+    return this._notesByID[id];
+}
+NoteBrowser.prototype.getFirstNoteByTitle = function(title) {
+    var notes = this._notesByTitle[title];
+    if (notes === undefined) return undefined;
+    for (var id in notes) {
+        return this._notesByID[id];
+    }
+    return undefined;
+}
+NoteBrowser.prototype.getNoteByTitle = function(title) {
+    return this._notesByTitle[title] || {};
+}
+NoteBrowser.prototype.getNotesByTag = function(tag) {
+    return this._notesByTag[tag] || {};
+}
+NoteBrowser.prototype.getAllNotes = function() {
+    return this._notesByID; /* XXX copy? */
+}
+NoteBrowser.prototype._showNote = function(id) {
+    if (!(id in this._notesByID)) {
+        noteBrowser.showError("Note not found.");
+        return;
+    }
+    this.currentNoteID.set(id);
+    /* XXX give noteViewer a chance to ask the user if the current note should
+     * be closed */
+    this._noteViewer.showNote(this.getNoteByID(id));
 }
 
 function NoteViewer() {
@@ -138,6 +207,9 @@ function NoteViewer() {
     this._syncTableArea = null;
     this._editArea = null;
     this._viewArea = null;
+    this._viewAreaTags = null;
+    this._viewAreaSubtags = null;
+    this._viewAreaText = null;
 
     this._showdown = new Showdown.converter();
 
@@ -147,6 +219,7 @@ function NoteViewer() {
     this._findUIElements();
 
     this._noteText = '';
+    this._noteTags = [];
     this._landRenderDuration = 500;
     this._lastRawText = '';
     this._renderTimer = null;
@@ -200,9 +273,11 @@ NoteViewer.prototype._findUIElements = function() {
 
     this._editArea = $('#editArea');
     this._viewArea = $('#viewArea');
+    this._viewAreaTags = $('#viewAreaTags');
+    this._viewAreaSubtags = $('#viewAreaSubtags');
+    this._viewAreaText = $('#viewAreaText');
 
-    /* XXX remove those again */
-    $(window).keyup(function() { lthis._textChanged(); });
+    $('#editTags').keyup(function() { lthis._tagsTextChanged(); });
     $('textarea', this._editArea).keyup(function() { lthis._textChanged(); });
     window.setInterval(function() {
         if (lthis._editMode && $('textarea', lthis._editArea).val() !== lthis._lastRawText)
@@ -220,7 +295,78 @@ NoteViewer.prototype._textChanged = function() {
 
     var lthis = this;
     this._renderTimer = window.setTimeout(function() { lthis._doRender(true); },
-                      Math.min(this._lastRenderDuration, 2000));
+                      Math.min(2.0 * this._lastRenderDuration, 2000));
+}
+NoteViewer.prototype._tagsTextChanged = function() {
+    if (!this._editMode)
+        return;
+
+    this._doRenderTags();
+}
+NoteViewer.prototype._getTagsFromInput = function() {
+    var tags = [];
+    $('#editTags').val().split(',').forEach(function(tag) {
+        tag = tag.trim();
+        if (tag === '')
+            return;
+        if (noteBrowser.getNoteByID(tag) !== undefined) {
+            tags.push(tag);
+        } else {
+            var note = noteBrowser.getFirstNoteByTitle(tag);
+            tags.push(note !== undefined ? note.getID() : tag);
+        }
+    });
+    return tags;
+}
+NoteViewer.prototype._doRenderTags = function() {
+    /* XXX listen on changes to these notes? */
+    var tagArea = $('#viewAreaTags').empty();
+    var tags;
+    if (this._editMode) {
+        tags = this._getTagsFromInput();
+    } else {
+        tags = this._noteTags;
+    }
+    var first = true;
+    tags.forEach(function(tag) {
+        if (!first)
+            tagArea.append(', ');
+        first = false;
+        var note = noteBrowser.getNoteByID(tag);
+        if (note === undefined) {
+            tagArea.append($('<span></span>').text(tag));
+        } else {
+            tagArea.append($('<a></a>', {href: '#' + note.getID()}).text(note.getTitle()));
+        }
+    });
+}
+NoteViewer.prototype._doRenderSubtags = function() {
+    /* XXX listen on changes to these notes? */
+    var tagArea = $('#viewAreaSubtags').empty();
+
+    function renderRec(tag, target, parents) {
+        var notes = $.map(noteBrowser.getNotesByTag(tag), function(note) { return note; });
+        if (notes.length === 0) return;
+
+        parents[tag] = 1;
+        var ul = $('<ul></ul>');
+        notes.sort(function(a, b) { return a.getTitle() < b.getTitle(); })
+            .forEach(function(note) {
+                var id = note.getID();
+                var title = note.getTitle();
+                var li = $('<li></li>')
+                    .append($('<a></a>', {href: '#' + id}) .text(title));
+                if (id in parents) {
+                    $('<ul><li>(loop)</li></ul>').appendTo(li);
+                } else {
+                    renderRec(id, li, parents);
+                }
+                li.appendTo(ul);
+            });
+        ul.appendTo(target);
+        delete parents[tag];
+    }
+    renderRec(this._note.getID(), tagArea, {});
 }
 NoteViewer.prototype._doRender = function(math) {
     this._renderTimer = null;
@@ -235,27 +381,32 @@ NoteViewer.prototype._doRender = function(math) {
     }
     this._lastRawText = text;
 
-    this._viewArea
+    this._viewAreaText
         .empty()
         .append(this._showdown.makeHtml(text));
     if (math)
-        MathJax.Hub.Queue(["Typeset", MathJax.Hub, this._viewArea[0]]);
+        MathJax.Hub.Queue(["Typeset", MathJax.Hub, this._viewAreaText[0]]);
 
     this._lastRenderDuration = (new Date()) - start;
 }
 NoteViewer.prototype.showNote = function(note, revision) {
+    var noteChange = !this._note || this._note.getID() !== note.getID();
     this._note = note;
     this._revision = revision;
     if (this._revisionGraph !== null)
-        this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision);
+        this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision,
+                                               noteChange ? note : undefined);
     this._updateSyncTable();
     this._toViewMode();
 }
 NoteViewer.prototype.showEditNote = function(note, revision) {
+    var noteChange = !this._note || this._note.getID() !== note.getID();
+    /* XXX clear the view areas (they can contain an old note) */
     this._note = note;
     this._revision = revision;
     if (this._revisionGraph !== null)
-        this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision);
+        this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision,
+                                               noteChange ? note : undefined);
     this._updateSyncTable();
     this._toEditMode();
 }
@@ -267,9 +418,17 @@ NoteViewer.prototype.showRevision = function(rev) {
 }
 NoteViewer.prototype._toEditMode = function() {
     var lthis = this;
+
     /* XXX progress indicator */
-    this._note.getText(this._revision)
-        .done(function(text) {
+    this._note.getRevision(this._revision)
+        .done(function(rev) {
+            var text = (rev === null ? '' : rev.getText());
+            var tags = (rev === null ? [] : rev.getTags());
+
+            lthis._doRenderTags();
+            lthis._doRenderSubtags();
+            lthis._doRender(true);
+
             lthis._editMode = true;
             lthis._buttonEdit.hide();
             lthis._buttonSave.show();
@@ -281,6 +440,7 @@ NoteViewer.prototype._toEditMode = function() {
             $('textarea', lthis._editArea)
                 .val(text)
                 .focus();
+            $('#editTags').val(tags.join(', '));
         })
         .fail(function(err) {
             noteBrowser.showError(err);
@@ -289,21 +449,27 @@ NoteViewer.prototype._toEditMode = function() {
 NoteViewer.prototype._toViewMode = function() {
     var lthis = this;
     /* XXX progress indicator */
-    this._note.getText(this._revision)
-        .done(function(text) {
+    this._note.getRevision(this._revision)
+        .done(function(rev) {
+            var text = (rev === null ? '' : rev.getText());
+            var tags = (rev === null ? [] : rev.getTags());
+
             lthis._editMode = false;
             lthis._noteText = text;
+            lthis._noteTags = tags;
 
             lthis._buttonEdit.show();
             lthis._buttonSave.hide();
             lthis._buttonCancel.hide();
 
+            lthis._doRenderTags();
+            lthis._doRenderSubtags();
+            lthis._doRender(true);
+
             lthis._viewArea
-                .empty()
                 .removeClass('span4')
                 .addClass('span9');
             lthis._editArea.hide();
-            lthis._doRender(true);
         })
         .fail(function(err) {
             noteBrowser.showError(err);
@@ -352,11 +518,16 @@ NoteViewer.prototype._saveChanges = function() {
             return;
     }
     var text = $('textarea', this._editArea).val();
+    var tags = $('#editTags').val().split(',').map(function(tag) {
+            tag = tag.trim();
+            var note = noteBrowser.getNoteByID(tag) || noteBrowser.getFirstNoteByTitle(tag);
+            return note !== undefined ? note.getID() : tag;
+        });
 
     var lthis = this;
     /* XXX if we are viewing an old revision, then mark it as manual
      * merge and adjust the parents appropriately. */
-    this._note.setText($('textarea', this._editArea).val())
+    this._note.setText(text, tags)
         .done(function(val) {
             if (lthis._revisionGraph)
                 lthis._revisionGraph.setCurrentRevision(lthis._note.getHeadRevisionID());
@@ -440,11 +611,13 @@ RevisionGraph.prototype._update = function() {
             lthis.redraw();
         });
 }
-RevisionGraph.prototype._getRoot = function() {
-    var id = this._note.getHeadRevisionID();
-    while (this._revisions[id].parents.length > 0)
-        id = this._revisions[id].parents[0];
-    return id;
+RevisionGraph.prototype._getRoots = function() {
+    var roots = [];
+    $.each(this._revisions, function(id, rev) {
+        if (rev.parents.length === 0)
+            roots.push(id);
+    });
+    return roots;
 }
 RevisionGraph.prototype._getChildrenMap = function() {
     var children = {};
@@ -458,12 +631,12 @@ RevisionGraph.prototype._getChildrenMap = function() {
     return children;
 }
 RevisionGraph.prototype._updateHierarchy = function() {
-    var root = this._getRoot();
+    var root = this._getRoots();
     var children = this._getChildrenMap();
 
     this._revisionPositions = {};
     var queue = {};
-    queue[root] = 1;
+    this._getRoots().forEach(function(root) { queue[root] = 1; });
     var x = 0;
     var cont = true;
     var maxColumn = 0;
@@ -539,13 +712,19 @@ RevisionGraph.prototype._updateUIElements = function() {
                         '<p><b>Date:</b> <span class="date"> </span><br/>' +
                         '<b>Author:</b> <span class="author"> </span><br/>' +
                         '<b>Parents:</b> <span class="parents"> </span><br/>' +
+                        '<b>Tags:</b> <span class="tags"> </span><br/>' +
                         '<b>Type:</b> <span class="revType"> </span></p>');
         if (rid in lthis._revisions) {
             var r = lthis._revisions[rid];
+            var tags = (r.tags || []).map(function(noteID) {
+                var n = noteBrowser.getNoteByID(noteID);
+                return n ? n.getTitle() : noteID;
+            });
             $('.date', content).text(r.date);
             $('.author', content).text(r.author);
             $('.revType', content).text(r.revType);
             $('.parents', content).text(r.parents.join(', '));
+            $('.tags', content).text(tags.join(', '));
             $('.title', content).text(r._id);
         }
         content.appendTo(infoDiv);
@@ -613,9 +792,14 @@ RevisionGraph.prototype.redraw = function() {
         ctx.fill();
     }
 }
-RevisionGraph.prototype.setCurrentRevision = function(revision) {
+RevisionGraph.prototype.setCurrentRevision = function(revision, note) {
     this._currentRevision = revision;
-    this.redraw();
+    if (note) {
+        this._note = note;
+        this._update();
+    } else {
+        this.redraw();
+    }
 }
 
 var DBInterface = (function() {
@@ -1211,7 +1395,7 @@ function SyncTargetList() {
     this._changeListener = null;
 
     var lthis = this;
-    dbInterface.on('ready', function() { lthis.update(); });
+    this.update();
     this._changeListener = dbInterface.on('change', function(doc) {
         if (doc.type && doc.type === 'syncTarget') {
             lthis._updateListEntry(new SyncTarget(doc));
@@ -1257,7 +1441,7 @@ function NoteList() {
     noteBrowser.currentNoteID.getLive(function(val) {
         lthis._setListHilight(val);
     });
-    dbInterface.on('ready', function() { lthis.update(); });
+    this.update();
     $('#sortByTitle').click(function() {
         lthis._sortStyle = 'title';
         $('li', $('#sortByTitle').closest('ul')).removeClass('active');
@@ -1282,22 +1466,10 @@ NoteList.prototype.update = function() {
     var lthis = this;
 
     $('#noteList li').remove();
-    lthis._notes = {};
-    /* TODO Add some "in progress" widget? Only remove shortly before update? */
-    dbInterface.getAllNoteTitles()
-        .done(function(notes) {
-            notes.forEach(function(note) {
-                lthis._insertNote(note);
-                /* XXX this is a bit slow */
-                /*
-                lthis._getNoteLink(note.getID(), note.getTitle()).appendTo('#noteList');
-                */
-            });
-            lthis._setListHilight(noteBrowser.currentNoteID.get());
-        })
-        .fail(function(err) {
-            noteBrowser.showError(err);
-        });
+    $.each(noteBrowser.getAllNotes(), function(id, note) {
+        lthis._insertNote(note);
+    });
+    this._setListHilight(noteBrowser.currentNoteID.get());
 }
 NoteList.prototype._getNoteLink = function(note, sortKey) {
     return $('<li id="noteList_' + note.getID() + '"/>')
@@ -1327,7 +1499,6 @@ NoteList.prototype._installChangeListener = function() {
     }
 }
 NoteList.prototype._dateToDayStr = function(date) {
-    /* XXX should be local timezone, and not as specified in date */
     var year = date.getFullYear();
     var month = date.getMonth() + 1;
     var day = date.getDate();
@@ -1339,7 +1510,6 @@ NoteList.prototype._dateToDayStr = function(date) {
     }
 }
 NoteList.prototype._removeNote = function(note) {
-    delete this._notes[note.getID()];
     /* XXX how to escape? */
     $('#noteList_' + note.getID()).remove();
 }
@@ -1388,8 +1558,6 @@ NoteList.prototype._insertElement = function(element, listParent, list, reversed
     }
 }
 NoteList.prototype._insertNote = function(note) {
-    this._notes[note.getID()] = note;
-
     if (this._sortStyle === 'title') {
         var l = this._getNoteLink(note, note.getTitle());
         this._insertElement(l, $('#noteList'), $('li', '#noteList'));
@@ -1449,6 +1617,7 @@ var Note = DBObject.extend({
         if (id === undefined) {
             this._dbObj.type = 'note';
             this._dbObj.title = '';
+            this._dbObj.tags = [];
             this._dbObj.date = null;
             this._dbObj.headRev = null;
             this._dbObj.syncWith = {};
@@ -1458,6 +1627,7 @@ var Note = DBObject.extend({
         /* headRev can be null at the first save */
         if (dbObj.type === 'note' && typeof(dbObj.title) === 'string' &&
                                      /*typeof(dbObj.date) === 'string' &&*/
+                                     /*$.isArray(dbObj.tags) &&*/
                                      typeof(dbObj.syncWith) === 'object') {
             if (this._dbObj.headRev !== dbObj.headRev)
                 this._headRevObj = null;
@@ -1469,23 +1639,26 @@ var Note = DBObject.extend({
     getTitle: function() {
         return this._dbObj.title;
     },
+    getTags: function() {
+        return this._dbObj.tags || [];
+    },
     getDate: function() {
         return new Date(this._dbObj.date);
     },
-    getText: function(revisionID) {
+    getRevision: function(revisionID) {
         var lthis = this;
         if (revisionID !== undefined && revisionID !== this._dbObj.headRev) {
             return (new NoteRevision(revisionID)).getConstructorPromise()
                 .pipe(function(nr) {
                     if (nr.getNoteID() !== lthis.getID())
                         return $.Deferred().reject("Invalid revision object " + nr.getID()).promise();
-                    return nr.getText();
+                    return nr;
                 });
         } else if (this._dbObj.headRev === null) {
-            return $.when("");
+            return $.when(null);
         } else {
             return this.getHeadRevision().pipe(function(hr) {
-                return hr.getText();
+                return hr;
             });
         }
     },
@@ -1517,10 +1690,10 @@ var Note = DBObject.extend({
     getLocalSeq: function(syncTarget) {
         return this._dbObj.syncWith[syncTarget];
     },
-    setText: function(text, author, date, revType, parents) {
+    setText: function(text, tags, author, date, revType, parents) {
         var lthis = this;
         var nr = new NoteRevision();
-        return nr.save(this.getID(), text, author || null, date || (new Date()),
+        return nr.save(this.getID(), text, tags || [], author || null, date || (new Date()),
                             revType || "edit", parents || [this._dbObj.headRev])
             .pipe(function(nr) {
                 try {
@@ -1539,6 +1712,7 @@ var Note = DBObject.extend({
             if (dbObj.headRev === currentRev) {
                 /* no conflict */
                 dbObj.headRev = revObj.getID();
+                dbObj.tags = revObj.getTags();
                 dbObj.title = revObj.getTitle();
                 dbObj.date = revObj.getDate();
                 return dbObj;
@@ -1552,6 +1726,7 @@ var Note = DBObject.extend({
                     return revObj.createMergedRevision(otherRevObj).pipe(function(newRevObj) {
                         currentRev = newRevObj.getID();
                         dbObj.headRev = newRevObj.getID();
+                        dbObj.tags = revObj.getTags();
                         dbObj.title = newRevObj.getTitle();
                         dbObj.date = revObj.getDate();
                         return dbObj;
@@ -1590,7 +1765,7 @@ var Note = DBObject.extend({
 Note.create = function(text) {
     /* first create the note to obtain an ID, then save the initial revision */
     return (new Note())._save().pipe(function(n) {
-        return n.setText(text, null, null, 'create', []);
+        return n.setText(text, [], null, null, 'create', []);
     });
 }
 Note.createWithExistingRevision = function(id, revObj, syncTarget) {
@@ -1602,6 +1777,7 @@ Note.createWithExistingRevision = function(id, revObj, syncTarget) {
             dbObj._id = id;
             dbObj.headRev = revObj.getID();
             dbObj.title = revObj.getTitle();
+            dbObj.tags = revObj.getTags();
             dbObj.date = revObj.getDate();
             dbObj.syncWith[syncTarget] = 0;
             return dbObj;
@@ -1619,15 +1795,17 @@ var NoteRevision = DBObject.extend({
             this._dbObj.author = null;
             this._dbObj.revType = null;
             this._dbObj.parents = null;
+            this._dbObj.tags = null;
             this._dbObj.text = null;
         }
     },
     setDBObj: function(dbObj) {
-        /* XXX check for sorted parents
+        /* XXX check for sorted parents and tags
          * XXX check for hash */
         if (dbObj.type === 'noteRevision' && typeof(dbObj.note) === 'string' &&
                     'date' in dbObj && 'author' in dbObj && typeof(dbObj.revType) === 'string' &&
-                    $.isArray(dbObj.parents) && typeof(dbObj.text) == 'string') {
+                    $.isArray(dbObj.parents) && /*$.isArray(dbObj.tags) &&*/
+                    typeof(dbObj.text) == 'string') {
             this._super(dbObj);
         } else {
             throw new Error("Invalid note revision object from database.");
@@ -1649,6 +1827,9 @@ var NoteRevision = DBObject.extend({
     getParents: function() {
         return this._dbObj.parents; /* TODO copy? perhaps too expensive */
     },
+    getTags: function() {
+        return this._dbObj.tags || []; /* TODO copy? perhaps too expensive */
+    },
     getTitle: function() {
         /* TODO improve this */
         var text = this.getText();
@@ -1660,7 +1841,6 @@ var NoteRevision = DBObject.extend({
             return "Note";
         }
     },
-    /* TODO revType, date, author? */
     createMergedRevision: function(otherRev) {
         var lthis = this;
         return this._findCommonAncestor(otherRev).pipe(function(parentId) {
@@ -1681,7 +1861,8 @@ var NoteRevision = DBObject.extend({
                 }
                 var textMerged = m.getMergedText();
                 var date = lthis.getDate() > otherRev.getDate() ? lthis.getDate() : otherRev.getDate();
-                return (new NoteRevision()).save(lthis.getNoteID(), textMerged, null, date,
+                var tags = MergeSortedLists(parentRev.getTags(), lthis.getTags(), otherRev.getTags());
+                return (new NoteRevision()).save(lthis.getNoteID(), textMerged, tags, null, date,
                                                  "auto merge", [lthis.getID(), otherRev.getID()]);
             });
         });
@@ -1708,7 +1889,7 @@ var NoteRevision = DBObject.extend({
         /* now hand it over to the professionals */
         return FindCommonAncestor(this.getNoteID(), this.getID(), otherRev.getID());
     },
-    save: function(noteID, text, author, date, revType, parents) {
+    save: function(noteID, text, tags, author, date, revType, parents) {
         return this._save(function(dbObj) {
             if ('_id' in dbObj || '_rev' in dbObj)
                 throw new Error("Only new revisions can be saved.");
@@ -1718,6 +1899,7 @@ var NoteRevision = DBObject.extend({
             dbObj.author = author,
             dbObj.revType = revType,
             dbObj.parents = parents.sort(),
+            dbObj.tags = tags.sort();
             dbObj.text = text
             /* TODO enforce normal form (encoding, etc) */
             dbObj._id = 'rev-' + MD5.hex_md5(JSON.stringify(dbObj));
@@ -1727,48 +1909,46 @@ var NoteRevision = DBObject.extend({
 });
 
 
-/* TODO use some view that retrieves all metadata for all revisions */
 function FindCommonAncestor(note, revA, revB) {
-    return dbInterface.getRevisionMetadata(note)
-        .pipe(function(revisions) {
-            var ancestorsA = {};
-            var ancestorsB = {};
-            var newIDsA = [revA];
-            var newIDsB = [revB];
+    return dbInterface.getRevisionMetadata(note).pipe(function(revisions) {
+        var ancestorsA = {};
+        var ancestorsB = {};
+        var newIDsA = [revA];
+        var newIDsB = [revB];
 
-            function getAllParents(ids) {
-                var parents = {};
-                ids.forEach(function(id) {
-                    revisions[id].parents.forEach(function(p) {
-                        parents[p] = 1;
-                    });
+        function getAllParents(ids) {
+            var parents = {};
+            ids.forEach(function(id) {
+                revisions[id].parents.forEach(function(p) {
+                    parents[p] = 1;
                 });
-                var list = [];
-                for (var p in parents)
-                    list.push(p);
-                return list
+            });
+            var list = [];
+            for (var p in parents)
+                list.push(p);
+            return list
+        }
+
+        while (newIDsA.length > 0 || newIDsB.length > 0) {
+            for (var i = 0; i < newIDsA.length; i ++) {
+                var id = newIDsA[i];
+                ancestorsA[id] = true;
+                if (id in newIDsB || id in ancestorsB)
+                    return $.Deferred().resolve(id).promise();
+            }
+            for (var i = 0; i < newIDsB.length; i ++) {
+                var id = newIDsB[i];
+                ancestorsB[id] = true;
+                if (id in ancestorsA)
+                    return $.Deferred().resolve(id).promise();
             }
 
-            while (newIDsA.length > 0 || newIDsB.length > 0) {
-                for (var i = 0; i < newIDsA.length; i ++) {
-                    var id = newIDsA[i];
-                    ancestorsA[id] = true;
-                    if (id in newIDsB || id in ancestorsB)
-                        return $.Deferred().resolve(id).promise();
-                }
-                for (var i = 0; i < newIDsB.length; i ++) {
-                    var id = newIDsB[i];
-                    ancestorsB[id] = true;
-                    if (id in ancestorsA)
-                        return $.Deferred().resolve(id).promise();
-                }
+            newIDsA = getAllParents(newIDsA);
+            newIDsB = getAllParents(newIDsB);
+        }
 
-                newIDsA = getAllParents(newIDsA);
-                newIDsB = getAllParents(newIDsB);
-            }
-
-            return $.Deferred().reject("No common parent found.").promise();
-        });
+        return $.Deferred().reject("No common parent found.").promise();
+    });
 }
 
 /* TODO remote could also be arbitrary local or remote directory:
@@ -1824,7 +2004,6 @@ RemoteCouchDB.prototype.bulkSave = function(docs) {
 }
 
 
-/* XXX this is a db object */
 var SyncTarget = DBObject.extend({
     _init: function(id) {
         this._super(id);
@@ -1930,9 +2109,6 @@ var SyncTarget = DBObject.extend({
                         }
                     });
 
-                    /* XXX check if someone added a new root - is it really bad?
-                     * we could modify the code to cope with multiple roots */
-
                     noteBrowser.showInfo("Valid objects: " + checkedObjects.idList().length, messageBox);
                     var docList = checkedObjects.map(function(o) { return o.getDBObject(); });
                     return dbInterface.saveDocs(docList).pipe(function(res) {
@@ -1971,18 +2147,14 @@ var SyncTarget = DBObject.extend({
     },
     _mergeHeadsAndUpdateDocuments: function(noteID, headRevisions, messageBox) {
         var lthis = this;
-        /* XXX for debugging */
-        var merge = true;
-        if (merge) {
-            var lthis = this;
-            if (headRevisions.length > 1) {
-                /* TODO merge the revisions that are "close" */
-                return headRevisions[0].createMergedRevision(headRevisions[1]).pipe(function(newRevObj) {
-                    var newHeads = headRevisions.splice(2);
-                    newHeads.push(newRevObj);
-                    return lthis._mergeHeadsAndUpdateDocuments(noteID, newHeads);
-                });
-            }
+        var lthis = this;
+        if (headRevisions.length > 1) {
+            /* TODO merge the revisions that are "close" */
+            return headRevisions[0].createMergedRevision(headRevisions[1]).pipe(function(newRevObj) {
+                var newHeads = headRevisions.splice(2);
+                newHeads.push(newRevObj);
+                return lthis._mergeHeadsAndUpdateDocuments(noteID, newHeads);
+            });
         }
         return (new Note(noteID)).getConstructorPromise().pipe(function(note) {
             if (!merge) return 1;
