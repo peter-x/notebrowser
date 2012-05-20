@@ -104,6 +104,134 @@ function addEvents(className, possibleEvents) {
     }
 }
 
+var LocalFileInterface = (function() {
+    function tryNetscape() {
+        try {
+            netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
+            var file = Components.classes["@mozilla.org/file/local;1"]
+                            .createInstance(Components.interfaces.nsILocalFile);
+        } catch (e) {
+            return false;
+        }
+        return true;
+    }
+    var javaLoader;
+
+    function tryJava() {
+        $(function() {
+            $(document.body).append('<applet style="position: absolute; left: -1px;" ' +
+                                'name="TiddlySaver" code="TiddlySaver.class" ' +
+                                'archive="TiddlySaver.jar" width="1" height="1"></applet>');
+        });
+        var d = $.Deferred();
+        var ttl = 6000;
+        function checkIfAppletInitialized() {
+            if (document.applets["TiddlySaver"] && 'saveFile' in document.applets["TiddlySaver"]) {
+                d.resolve(document.applets["TiddlySaver"]);
+            } else {
+                ttl -= 200;
+                if (ttl < 0) {
+                    d.reject();
+                } else {
+                    window.setTimeout(checkIfAppletInitialized, 200);
+                }
+            }
+        }
+        checkIfAppletInitialized();
+        return d;
+    }
+
+    function readNetscape(path) {
+        try {
+            netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
+            var file = Components.classes["@mozilla.org/file/local;1"]
+                            .createInstance(Components.interfaces.nsILocalFile);
+            file.initWithPath(path);
+            if (!file.exists())
+                return $.Deferred().reject("File not found.").promise();
+            var inputStream = Components.classes["@mozilla.org/network/file-input-stream;1"]
+                                .createInstance(Components.interfaces.nsIFileInputStream);
+            inputStream.init(file, 0x01, 0x04, null);
+            var sInputStream = Components.classes["@mozilla.org/scriptableinputstream;1"]
+                                .createInstance(Components.interfaces.nsIScriptableInputStream);
+            sInputStream.init(inputStream);
+            var contents = sInputStream.read(sInputStream.available());
+            sInputStream.close();
+            inputStream.close();
+
+            return $.when(contents);
+        } catch (e) {
+            return $.Deferred().reject(e.message).promise();
+        }
+    }
+    function writeNetscape(path, data) {
+        try {
+            netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
+            var file = Components.classes["@mozilla.org/file/local;1"]
+                            .createInstance(Components.interfaces.nsILocalFile);
+            file.initWithPath(path);
+            if (!file.exists())
+                file.create(0, 0x01B4);
+            var outputStream = Components.classes["@mozilla.org/network/file-output-stream;1"]
+                            .createInstance(Components.interfaces.nsIFileOutputStream);
+            outputStream.init(file, 0x22, 0x04, null);
+
+            outputStream.write(data, data.length);
+            outputStream.close();
+
+            return $.when(true);
+        } catch (e) {
+            return $.Deferred().reject(e.message).promise();
+        }
+    }
+
+    function urlToLocalPath(url) {
+        if (url.substr(0, 7) == "file://") {
+            return url.substr(7);
+        } else {
+            return url;
+        }
+    }
+
+    function readJava(path) {
+        return javaLoader.pipe(function(applet) {
+            try {
+                path = urlToLocalPath(path);
+                var data = document.applets["TiddlySaver"].loadFile(path + "\0\0\0\0", "UTF-8\0\0\0\0");
+                if (data === null) {
+                    return $.Deferred().reject("File not found.").promise();
+                } else {
+                    return data;
+                }
+            } catch (e) {
+                return $.Deferred().reject(e.message).promise();
+            }
+        });
+    }
+    function writeJava(path, data) {
+        return javaLoader.pipe(function(applet) {
+            try {
+                path = urlToLocalPath(path);
+                if (document.applets["TiddlySaver"].saveFile(path + "\0\0\0\0", "UTF-8\0\0\0\0", data + "\0\0\0\0") == 1) {
+                    return true;
+                } else {
+                    return $.Deferred().reject("Error writing file.").promise();
+                }
+            } catch (e) {
+                return $.Deferred().reject(e.message).promise();
+            }
+        });
+    }
+
+    if (tryNetscape()) {
+        return {read: readNetscape, write: writeNetscape};
+    } else {
+        javaLoader = tryJava();
+        return {read: readJava, write: writeJava};
+    }
+
+})();
+
 function LiveValue(initial) {
     this._val = initial;
 }

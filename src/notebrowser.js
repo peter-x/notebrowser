@@ -100,6 +100,8 @@ NoteBrowser.prototype._init = function() {
     $(window).on('hashchange', checkHash);
     checkHash();
 
+    this._updateSyncTargetButtons();
+
     $('#newNoteButton').click(function() {
         Note.create('# New Note\n')
             .fail(function(err) { lthis.showError(err); })
@@ -1333,47 +1335,16 @@ InMemoryDB.prototype._autoSave = function() {
     var path = document.location.pathname.replace(/\/index.html$/, '') + '/data.jsonp';
     var data = 'noteBrowserData = ' + this._export() + ';';
 
-    if (!this._autoSaveNetscape(path, data) && !this._autoSaveJava(path, data)) {
-        noteBrowser.showError("Unable to save data to local filesystem.");
-        window.clearInterval(this._autoSaveInterval);
-        this._autoSaveInterval = null;
-    } else {
-        this._lastAutoSave = this._changeLog.length;
-    }
-}
-InMemoryDB.prototype._autoSaveNetscape = function(path, data) {
-    try {
-        netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
-    } catch (e) {
-        return false;
-    }
-    var file = Components.classes["@mozilla.org/file/local;1"]
-                    .createInstance(Components.interfaces.nsILocalFile);
-    file.initWithPath(path);
-    if (!file.exists())
-        file.create(0, 0x01B4);
-    var outputStream = Components.classes["@mozilla.org/network/file-output-stream;1"]
-                    .createInstance(Components.interfaces.nsIFileOutputStream);
-    outputStream.init(file, 0x22, 0x04, null);
-
-    outputStream.write(data, data.length);
-    outputStream.close();
-
-    return true;
-}
-InMemoryDB.prototype._autoSaveJava = function(path, data) {
-    if (!document.applets["TiddlySaver"]) {
-        /* XXX wait for initialization */
-        $(document.body).append('<applet style="position: absolute; left: -1px;" ' +
-                                'name="TiddlySaver" code="TiddlySaver.class" ' +
-                                'archive="TiddlySaver.jar" width="1" height="1"></applet>');
-    }
-
-    try {
-        return document.applets["TiddlySaver"].saveFile(path, "UTF-8\0\0\0\0", data);
-    } catch (e) {
-    }
-    return false;
+    var lthis = this;
+    LocalFileInterface.write(path, data)
+        .done(function() {
+            lthis._lastAutoSave = lthis._changeLog.length;
+        })
+        .fail(function(err) {
+            noteBrowser.showError("Unable to save data to local filesystem: " + err);
+            window.clearInterval(lthis._autoSaveInterval);
+            lthis._autoSaveInterval = null;
+        });
 }
 addEvents(InMemoryDB, ['ready', 'change']);
 
@@ -1955,7 +1926,7 @@ function FindCommonAncestor(note, revA, revB) {
  * save revisions as file with name <id> and additionally a zero-length file <x>-<id>,
  * where x is a number that gets incremented by each save. 
  * */
-function RemoteCouchDB(url) {
+function SyncInterfaceCouchDB(url) {
     this._url = url;
 
     this._ajaxOpts = {type: 'GET',
@@ -1964,15 +1935,23 @@ function RemoteCouchDB(url) {
                     dataType: 'json',
                     cache: !$.browser.msie};
 }
-RemoteCouchDB.prototype.changedDocuments = function(since) {
+SyncInterfaceCouchDB.prototype.changedDocuments = function(since) {
     return $.ajax($.extend(this._ajaxOpts, {
                         url: this._url + '/_changes',
                         data: {since: since}}))
-        .pipe(null, function(req, error) {
+        .pipe(function(res) {
+            var docIDs = {};
+            res.results.forEach(function(change) {
+                var id = change.id;
+                if (!change.deleted) /* ignore deletes */
+                    docIDs[id] = 1;
+            });
+            return {lastSeq: res.last_seq, docIDs: docIDs};
+        }, function(req, error) {
             return "Error retrieving remote changed documents: " + error;
         });
 }
-RemoteCouchDB.prototype.getDocs = function(ids) {
+SyncInterfaceCouchDB.prototype.getDocs = function(ids) {
     return $.ajax($.extend(this._ajaxOpts, {
                         type: 'POST',
                         url: this._url + '/_all_docs?include_docs=true',
@@ -1988,7 +1967,7 @@ RemoteCouchDB.prototype.getDocs = function(ids) {
             return "Error retrieving remote documents: " + error;
         });
 }
-RemoteCouchDB.prototype.bulkSave = function(docs) {
+SyncInterfaceCouchDB.prototype.bulkSave = function(docs) {
     /* TODO do we have to remove the _rev field? */
     return $.ajax($.extend(this._ajaxOpts, {
                         type: 'POST',
@@ -2001,6 +1980,114 @@ RemoteCouchDB.prototype.bulkSave = function(docs) {
         }, function(req, error) {
             return "Error saving documents to remote server: " + error;
         });
+}
+
+/* interface to local filesystem without "list directory" capabilities,
+ * will cause corruptions on simultaneous writes */
+function SyncInterfaceLocalFile(url) {
+    this._url = url;
+    this._lastChangeSeq = 0;
+}
+SyncInterfaceLocalFile.prototype.changedDocuments = function(since) {
+    var lthis = this;
+
+    var docIDs = {};
+
+    var d = $.Deferred();
+    function readChangeFile(s) {
+        LocalFileInterface.read(lthis._url + '/changes-' + s)
+            .done(function(data) {
+                try {
+                    JSON.parse(data).foreach(function(id) {
+                        if (typeof(id) === 'string')
+                            docIDs[id] = 1;
+                    });
+                } catch (e) {
+                    /* XXX report error? */
+                }
+                readChangeFile(s + 1);
+            })
+            .fail(function(err) {
+                lthis._lastChangeSeq = s - 1;
+                d.resolve({lastSeq: s - 1, docIDs: docIDs});
+            });
+    }
+    readChangeFile((since || 0) + 1);
+    return d.promise();
+}
+SyncInterfaceLocalFile.prototype.getDocs = function(ids) {
+    var lthis = this;
+    var docs = {};
+    var d = $.Deferred();
+    function readDoc(i) {
+        if (i >= ids.length) {
+            d.resolve(docs);
+            return;
+        }
+        LocalFileInterface.read(lthis._url + '/' + ids[i])
+            .done(function(data) {
+                try {
+                    /* XXX what if the stored id does not match the file name? */
+                    var doc = JSON.parse(data);
+                    docs[doc._id] = doc;
+                } catch (e) {
+                    /* XXX report error? */
+                }
+                readDoc(i + 1);
+            })
+            .fail(function(err) {
+                readDoc(i + 1);
+            });
+    }
+    readDoc(0);
+    return d.promise();
+}
+SyncInterfaceLocalFile.prototype.bulkSave = function(docs) {
+    var lthis = this;
+    var changes = [];
+    var d = $.Deferred();
+    function writeDoc(i) {
+        if (i >= docs.length) {
+            lthis._saveChanges(changes)
+                .done(function() { d.resolve(); })
+                .fail(function(err) { d.reject("Error saving changes log: " + err); });
+            return;
+        }
+        /* XXX what if the id is "changes-2"? */
+        var data = JSON.stringify(docs[i]);
+        LocalFileInterface.write(lthis._url + '/' + docs[i]._id, data)
+            .done(function() { writeDoc(i + 1); })
+            .fail(function(err) { /* XXX report the error? */ writeDoc(i + 1); });
+    }
+    writeDoc(0);
+    return d.promise();
+}
+SyncInterfaceLocalFile.prototype._findNextChangeSeq = function() {
+    var lthis = this;
+
+    var d = $.Deferred();
+    function readChangeFile(s) {
+        LocalFileInterface.read(lthis._url + '/changes-' + s)
+            .done(function() { readChangeFile(s + 1); })
+            .fail(function(err) { d.resolve(s); });
+    }
+    readChangeFile(this._lastChangeSeq + 1);
+    return d.promise();
+}
+SyncInterfaceLocalFile.prototype._saveChanges = function(changes) {
+    var lthis = this;
+    return this._findNextChangeSeq().pipe(function(changeSeq) {
+        return LocalFileInterface.write(lthis._url + '/changes-' + changeSeq,
+                                JSON.stringify(changes));
+    });
+}
+
+var getSyncInterface = function(url) {
+    if (url.substr(0, 7) === 'file://') {
+        return new SyncInterfaceLocalFile(url);
+    }  else {
+        return new SyncInterfaceCouchDB(url);
+    }
 }
 
 
@@ -2035,8 +2122,7 @@ var SyncTarget = DBObject.extend({
         var lthis = this;
         var messageBox = noteBrowser.showInfo("Synchronizing with " + this.getName());
 
-        /* TODO different remote types */
-        var remoteDB = new RemoteCouchDB(this.getURL());
+        var remoteDB = getSyncInterface(this.getURL());
 
         if (!$.support.cors) {
             try {
@@ -2053,23 +2139,16 @@ var SyncTarget = DBObject.extend({
         noteBrowser.showInfo("Requesting changes since " + this.getRemoteSeq(), messageBox);
         return remoteDB.changedDocuments(this.getRemoteSeq()).pipe(function(remoteChanges) {
             /* TODO make this robust, catch exceptions and report them */
-            var objs = new ObjectBag();
-            var objsInOrder = [];
-            remoteChanges.results.forEach(function(change) {
-                var id = change.id;
-                if (!change.deleted) /* ignore deletes */
-                    objs.insert(1, id);
-            });
+            var idList = $.map(remoteChanges.docIDs, function(v, id) { return id; });
 
             /* XXX actually we should ask for the ids that are not missing... */
-            return dbInterface.determineAvailableNoteRevisions(objs.idList()).pipe(function(availableObjs) {
+            return dbInterface.determineAvailableNoteRevisions(idList).pipe(function(availableObjs) {
                 var objectsToFetch = [];
-                for (var i = 0; i < remoteChanges.results.length; i ++) {
-                    var id = remoteChanges.results[i].id;
+                for (var id in remoteChanges.docIDs) {
                     if (!(id in availableObjs))
                         objectsToFetch.push(id);
                 }
-                return lthis._fetchRevisions(remoteDB, objectsToFetch, remoteChanges.last_seq, messageBox);
+                return lthis._fetchRevisions(remoteDB, objectsToFetch, remoteChanges.lastSeq, messageBox);
             });
         });
     },
@@ -2157,7 +2236,6 @@ var SyncTarget = DBObject.extend({
             });
         }
         return (new Note(noteID)).getConstructorPromise().pipe(function(note) {
-            if (!merge) return 1;
             if (note.getLocalSeq(lthis.getID()) === undefined) return 1;
             return note.mergeWithRevision(headRevisions[0]);
         }, function() {
@@ -2184,7 +2262,7 @@ var SyncTarget = DBObject.extend({
                 });
             });
             return DeferredSynchronizer(processes).pipe(function() {
-                var remoteDB = new RemoteCouchDB(lthis.getURL());
+                var remoteDB = getSyncInterface(lthis.getURL());
                 noteBrowser.showInfo("Objs to push: " + revisionObjects.length, messageBox);
                 /* TODO we could have errors in some processes */
                 return remoteDB.bulkSave(revisionObjects);
