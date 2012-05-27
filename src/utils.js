@@ -148,13 +148,14 @@ var LocalFileInterface = (function() {
                             .createInstance(Components.interfaces.nsILocalFile);
             file.initWithPath(path);
             if (!file.exists())
-                return $.Deferred().reject("File not found.").promise();
+                return $.Deferred().reject("File not found: " + path).promise();
             var inputStream = Components.classes["@mozilla.org/network/file-input-stream;1"]
                                 .createInstance(Components.interfaces.nsIFileInputStream);
             inputStream.init(file, 0x01, 0x04, null);
             var sInputStream = Components.classes["@mozilla.org/scriptableinputstream;1"]
                                 .createInstance(Components.interfaces.nsIScriptableInputStream);
             sInputStream.init(inputStream);
+            /* XXX use asynchronous IO */
             var contents = sInputStream.read(sInputStream.available());
             sInputStream.close();
             inputStream.close();
@@ -176,6 +177,7 @@ var LocalFileInterface = (function() {
                             .createInstance(Components.interfaces.nsIFileOutputStream);
             outputStream.init(file, 0x22, 0x04, null);
 
+            /* XXX use asynchronous IO */
             outputStream.write(data, data.length);
             outputStream.close();
 
@@ -184,6 +186,74 @@ var LocalFileInterface = (function() {
             return $.Deferred().reject(e.message).promise();
         }
     }
+    function existsNetscape(path) {
+        try {
+            netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
+            var file = Components.classes["@mozilla.org/file/local;1"]
+                            .createInstance(Components.interfaces.nsILocalFile);
+            file.initWithPath(path);
+            return $.when(file.exists());
+        } catch (e) {
+            return $.Deferred().reject(e.message).promise();
+        }
+    }
+    function listNetscape(path, create) {
+        var files = [];
+        try {
+            netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
+            var dir = Components.classes["@mozilla.org/file/local;1"]
+                            .createInstance(Components.interfaces.nsILocalFile);
+            dir.initWithPath(path);
+            if (!dir.exists()) {
+                if (create) {
+                    dir.create(1, 0x1FD); 
+                } else {
+                    return $.Deferred().reject("File not found.").promise();
+                }
+            } else if (!dir.isDirectory()) {
+                return $.Deferred().reject("File is not a directory.").promise();
+            }
+            var entries = dir.directoryEntries;
+            while (entries.hasMoreElements()) {
+                var name = entries.getNext().QueryInterface(Components.interfaces.nsILocalFile).leafName;
+                files.push(name);
+            }
+
+            return $.when(files);
+        } catch (e) {
+            return $.Deferred().reject(e.message).promise();
+        }
+    }
+    function acquireLockNetscape(path) {
+        try {
+            netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
+            var file = Components.classes["@mozilla.org/file/local;1"]
+                            .createInstance(Components.interfaces.nsILocalFile);
+            file.initWithPath(path);
+            file.create(0, 0x01B4);
+            return $.when(true);
+        } catch (e) {
+            if ('name' in e && e.name === "NS_ERROR_FILE_ALREADY_EXISTS") {
+                var age = (new Date()) - file.lastModifiedTime();
+                return $.when(false, age);
+            } else {
+                return $.Deferred().reject(e.message).promise();
+            }
+        }
+    }
+    function releaseLockNetscape(path) {
+        try {
+            netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
+            var file = Components.classes["@mozilla.org/file/local;1"]
+                            .createInstance(Components.interfaces.nsILocalFile);
+            file.initWithPath(path);
+            file.remove(false);
+            return $.when(true);
+        } catch (e) {
+            return $.Deferred().reject(e.message).promise();
+        }
+    }
+
 
     function urlToLocalPath(url) {
         if (url.substr(0, 7) == "file://") {
@@ -224,7 +294,9 @@ var LocalFileInterface = (function() {
     }
 
     if (tryNetscape()) {
-        return {read: readNetscape, write: writeNetscape};
+        return {read: readNetscape, write: writeNetscape, list: listNetscape,
+                exists: existsNetscape,
+                acquireLock: acquireLockNetscape, releaseLock: releaseLockNetscape};
     } else {
         javaLoader = tryJava();
         return {read: readJava, write: writeJava};
@@ -289,13 +361,13 @@ var DeferredSynchronizer = function(args) {
         deferred = $.Deferred();
 
     if (length == 0)
-        deferred.resolveWith(deferred, [], []);
+        deferred.resolveWith(deferred, [[], []]);
 
     function resolveFunc(i) {
         return function(value) {
             args[i] = arguments.length > 1 ? [].slice.call(arguments, 0) : value;
             if (--count === 0) {
-                deferred.resolveWith(deferred, args, errors);
+                deferred.resolveWith(deferred, [args, errors]);
             }
         };
     }
@@ -304,7 +376,7 @@ var DeferredSynchronizer = function(args) {
             errors[i] = arguments.length > 1 ? [].slice.call(arguments, 0) : value;
             args[i] = null;
             if (--count === 0) {
-                deferred.resolveWith(deferred, args, errors);
+                deferred.resolveWith(deferred, [args, errors]);
             }
         };
     }

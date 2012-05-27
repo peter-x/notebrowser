@@ -10,6 +10,8 @@ function NoteBrowser() {
 
     this._noteViewer = new NoteViewer();
 
+    /* XXX objects in here should not be change.
+     * enforce that by setting them to "constant"? */
     this._notesByID = null;
     this._notesByTitle = null;
     this._notesByTag = null;
@@ -27,7 +29,7 @@ function NoteBrowser() {
             }
         });
         dbInterface.on('ready', function() {
-            dbInterface.getAllNoteTitles()
+            dbInterface.getAllNotes()
                 .done(function(notes) {
                     lthis._notesByID = {};
                     lthis._notesByTitle = {};
@@ -74,7 +76,8 @@ NoteBrowser.prototype._removeNote = function(id) {
     var note = this._notesByID[id];
 
     note.getTags().forEach(function(tag) {
-        delete lthis._notesByTag[tag][id];
+        if (lthis._notesByTag[tag] !== undefined)
+            delete lthis._notesByTag[tag][id];
     });
     delete this._notesByTitle[note.getTitle()][id];
     delete this._notesByID[id];
@@ -145,6 +148,7 @@ NoteBrowser.prototype._updateSyncTargetButtons = function() {
     });
 }
 NoteBrowser.prototype._updateSyncTargetButton = function(target) {
+    target = target.copy();
     $('#synctargetbutton_' + target.getID(), '#syncTargetButtons').remove();
     $('<li id="synctargetbutton_' + target.getID() + '"/>')
         .append($('<a href="#"/>')
@@ -393,7 +397,7 @@ NoteViewer.prototype._doRender = function(math) {
 }
 NoteViewer.prototype.showNote = function(note, revision) {
     var noteChange = !this._note || this._note.getID() !== note.getID();
-    this._note = note;
+    this._note = note.copy();
     this._revision = revision;
     if (this._revisionGraph !== null)
         this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision,
@@ -404,7 +408,7 @@ NoteViewer.prototype.showNote = function(note, revision) {
 NoteViewer.prototype.showEditNote = function(note, revision) {
     var noteChange = !this._note || this._note.getID() !== note.getID();
     /* XXX clear the view areas (they can contain an old note) */
-    this._note = note;
+    this._note = note.copy();
     this._revision = revision;
     if (this._revisionGraph !== null)
         this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision,
@@ -605,7 +609,7 @@ RevisionGraph.prototype._installChangeListener = function() {
 RevisionGraph.prototype._update = function() {
     var lthis = this;
     dbInterface.getRevisionMetadata(this._note.getID())
-        .fail(function(err) { NoteBrowser.showError("Error loading revisions: " + err); })
+        .fail(function(err) { noteBrowser.showError("Error loading revisions: " + err); })
         .done(function(revs, updateSeq) {
             lthis._revisions = revs;
             lthis._updateHierarchy();
@@ -722,12 +726,13 @@ RevisionGraph.prototype._updateUIElements = function() {
                 var n = noteBrowser.getNoteByID(noteID);
                 return n ? n.getTitle() : noteID;
             });
+            var shortenID = function(id) { return id.replace(/.*\//, ''); }
             $('.date', content).text(r.date);
             $('.author', content).text(r.author);
             $('.revType', content).text(r.revType);
-            $('.parents', content).text(r.parents.join(', '));
+            $('.parents', content).text(r.parents.map(shortenID).join(', '));
             $('.tags', content).text(tags.join(', '));
-            $('.title', content).text(r._id);
+            $('.title', content).text(shortenID(r._id));
         }
         content.appendTo(infoDiv);
     }
@@ -821,7 +826,7 @@ PouchDB.prototype._ini = function() {
         lthis._trigger('ready');
     });
 }
-PouchDB.prototype.getAllNoteTitles = function() {
+PouchDB.prototype.getAllNotes = function() {
     /* TODO */
     var queryFun = function(doc) { if (doc.type === 'note') emit(doc.title, null); };
     this._db.query(queryFun, null, function(err, res) {
@@ -903,7 +908,7 @@ CouchDB.prototype._registerChangesFeed = function(updateSeq) {
 CouchDB.prototype.determineAvailableNoteRevisions = function(keys) {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
-    
+    /* XXX can we use couch.allDocs()? */
     var ajaxOpts = {type: 'GET',
                     contentType: 'application/json',
                     dataType: 'json',
@@ -921,10 +926,10 @@ CouchDB.prototype.determineAvailableNoteRevisions = function(keys) {
             });
             return available;
         }, function(req, error) {
-            return "Error determining objects available on local serer: " + error;
+            return "Error determining objects available on local server: " + error;
         });
 }
-CouchDB.prototype.getAllNoteTitles = function() {
+CouchDB.prototype.getAllNotes = function() {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
 
@@ -1041,7 +1046,7 @@ CouchDB.prototype.changedRevisions = function(noteID, since) {
             return "Error determining changed revisions on local serer: " + error;
         });
 }
-CouchDB.prototype.saveDocs = function(docs) {
+CouchDB.prototype.saveRevisions = function(docs) {
     if (!this._db)
         return $.Deferred().reject("Not connected to database.").promise();
 
@@ -1084,6 +1089,372 @@ CouchDB.prototype.saveDoc = function(doc) {
     return d.promise();
 }
 addEvents(CouchDB, ['ready', 'change']);
+
+function LocalFileSystemDB(path) {
+    this._path = path || this._pathFromDocumentLocation();
+    this._fs = null;
+    this._changeInterval = null;
+    this._initialized = false;
+    this._lastChangeSeq = 0;
+    this._changeSeqsToIgnore = {};
+
+    var lthis = this;
+    window.setTimeout(function() {
+        lthis._fs = LocalFileInterface;
+        lthis._initChangeListener();
+        lthis._initMergeService();
+    }, 10);
+}
+LocalFileSystemDB.prototype._pathFromDocumentLocation = function() {
+    var path = unescape(document.location.pathname);
+    var i = path.lastIndexOf('/');
+    if (i < 0) {
+        return path;
+    } else {
+        return path.substr(0, i);
+    }
+}
+/* XXX remove changeInterval on destruction */
+LocalFileSystemDB.prototype._initChangeListener = function() {
+    var lthis = this;
+
+    function checkForChanges() {
+        /* XXX avoid duplicate change notifications */
+        var i = lthis._lastChangeSeq + 1;
+        lthis._fs.exists(lthis._path + '/data/changes/' + i).done(function(ex) {
+            /* XXX what if it exists but is still empty? */
+            if (!ex) return;
+            lthis._lastChangeSeq = Math.max(lthis._lastChangeSeq, i);
+            if (lthis._changeSeqsToIgnore[i])
+                return;
+            lthis._readJSON('data/changes/' + i).done(function(change) {
+                change.changes.forEach(function(path) {
+                    lthis._readJSON(path).done(function(doc) {
+                        lthis._trigger('change', doc);
+                    });
+                });
+            });
+        });
+
+    }
+    lthis._listDir('data/changes').pipe(function(files) {
+        var largest = 0;
+        files.forEach(function(f) {
+            if (f !== 'lock' && f - 0 > largest)
+                largest = f - 0;
+        });
+        lthis._lastChangeSeq = largest;
+        lthis._changeInterval = window.setInterval(checkForChanges, 1000);
+        lthis._initialized = true;
+        lthis._trigger('ready');
+    });
+}
+LocalFileSystemDB.prototype._initMergeService = function() {
+    /* XXX
+     * read "/data_local/lastSaneChange", extract last checked change sequence and check newer
+     * changes for consistency and merge them if necessary. */
+    /* XXX wait for ready signal? */
+}
+LocalFileSystemDB.prototype.determineAvailableNoteRevisions = function(keys) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+    var available = {};
+    return DeferredSynchronizer(keys.map(function(key) {
+        /* XXX sanity check for key */
+        return lthis._fs.exists('data/notes/' + key).pipe(function(res) {
+                if (res) available[key] = 1;
+            });
+    })).pipe(function() {
+        return available;
+    });
+}
+LocalFileSystemDB.prototype.getAllNotes = function() {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+    return this._readJSONFilesInDir('data_local/notes').pipe(function(objs) {
+        var notes = [];
+        objs.forEach(function(o) {
+            try {
+                notes.push(new Note(o));
+            } catch (e) {
+                /* XXX */
+            }
+        });
+        return notes;
+    });
+}
+LocalFileSystemDB.prototype.getAllSyncTargets = function() {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+    
+    var lthis = this;
+    var path = this._path;
+    return this._readJSONFilesInDir('data_local/syncTargets').pipe(function(objs) {
+        var targets = [];
+        objs.forEach(function(o) {
+            try {
+                targets.push(new SyncTarget(o));
+            } catch (e) {
+                /* XXX */
+            }
+        });
+        return targets;
+    });
+}
+LocalFileSystemDB.prototype._readJSONFilesInDir = function(dir, noCreate) {
+    var lthis = this;
+    return this._listDir(dir, noCreate).pipe(function(files) {
+        var processes = [];
+        files.forEach(function(f) {
+            if (!f.match('\.lock$'))
+                processes.push(lthis._readJSON(dir + '/' + f));
+        });
+        return DeferredSynchronizer(processes);
+    });
+}
+LocalFileSystemDB.prototype._readJSON = function(path) {
+    return this._fs.read(this._path + '/' + path).pipe(function(data) {
+        try {
+            return JSON.parse(data);
+        } catch (e) {
+            return $.Deferred().reject("JSON error: " + e.message).promise();
+        }
+    });
+}
+LocalFileSystemDB.prototype._listDir = function(dir, noCreate) {
+    return this._fs.list(this._path + '/' + dir, !noCreate);
+}
+LocalFileSystemDB.prototype.getDoc = function(id) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    if (!id.match(/^[a-zA-Z0-9\/]*$/))
+        return $.Deferred().reject("Invalid document id.").promise();
+
+    var file;
+    if (id.match(/\//)) {
+        return this._readJSON('data/notes/' + id);
+    } else {
+        return this._readJSON('data_local/notes/' + id).pipe(null,
+            function(err) {
+                return this._readJSON('data_local/syncTargets/' + id);
+            });
+    }
+}
+LocalFileSystemDB.prototype.getRevisionMetadata = function(noteID) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+    var path = this._path;
+    return this._readJSONFilesInDir('data/notes/' + noteID, true).pipe(function(objList) {
+        var objs = {};
+        objList.forEach(function(o) {
+            delete o.text;
+            objs[o._id] = o;
+        });
+        return objs;
+    });
+}
+LocalFileSystemDB.prototype.changedRevisions = function(noteID, after) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+    var revs = [];
+    var idPrefix = 'data/notes/';
+    var notePrefix = idPrefix + noteID + '/';
+    function getChanges(i) {
+        return lthis._readJSON('data/changes/' + i).pipe(function(data) {
+            data.changes.forEach(function(path) {
+                if (path.substr(0, notePrefix.length) === notePrefix)
+                    revs.push(path.substr(idPrefix.length));
+            });
+            return getChanges(i + 1);
+        }, function() {
+            return {lastSeq: i - 1, revisions: revs};
+        });
+    }
+    
+    return getChanges(after + 1);
+}
+LocalFileSystemDB.prototype._acquireLock = function(path) {
+    var lthis = this;
+    var maxAge = 4000; /* remove locks older than four seconds */
+    var retryTime = 100; /* retry every 100 ms */
+
+    return this._fs.acquireLock(this._path + '/' + path + '.lock').pipe(function(success, age) {
+        if (success)
+            return true;
+        if (age < maxAge) {
+            var d = $.Deferred();
+            window.setTimeout(function() {
+                lthis._acquireLock(path)
+                    .done(function() { d.resolve.apply(d, arguments); })
+                    .fail(function() { d.reject.apply(d, arguments); });
+            }, retryTime);
+            return d.promise();
+        } else {
+            /* XXX message */
+            console.log("Forcibly removed lock on " + path);
+            return lthis._fs.releaseLock(path + '.lock').pipe(function() {
+                return lthis._acquireLock(path);
+            });
+        }
+    });
+}
+LocalFileSystemDB.prototype._releaseLock = function(path) {
+    /* XXX ignore errors for inexistent locks? */
+    return this._fs.releaseLock(this._path + '/' + path + '.lock');
+}
+LocalFileSystemDB.prototype._getPathForDoc = function(doc) {
+    if (doc.type === 'note') {
+        return 'data_local/notes/' + doc._id;
+    } else if (doc.type === 'noteRevision') {
+        return 'data/notes/' + doc._id;
+    } else if (doc.type === 'syncTarget') {
+        return 'data_local/syncTargets/' + doc._id;
+    } else {
+        return null;
+    }
+}
+LocalFileSystemDB.prototype._saveDoc = function(doc, dullSave) {
+    var lthis = this;
+
+    if (!('_id' in doc)) {
+        if (doc.type === 'noteRevision') {
+            doc._id = doc.note + '/' + this._genID();
+        } else {
+            doc._id = this._genID();
+        }
+    }
+    if (!dullSave) {
+        if (!('_rev' in doc))
+            doc._rev = '0-x';
+        doc._rev = this._getIncrementedRev(doc);
+    }
+
+    var path = this._getPathForDoc(doc);
+    if (path === null) {
+        return $.Deferred().reject("Invalid document type.").promise();
+    }
+
+    /* XXX also release the lock on errors */
+
+    var data;
+    try {
+        data = JSON.stringify(doc);
+    } catch (e) {
+        return $.Deferred().reject("Invalid data in document: " + e.message).promise();
+    }
+    if (dullSave) {
+        return this._fs.write(this._path + '/' + path, data).pipe(function() { return null; });
+    }
+    return this._acquireLock(path).pipe(function() {
+        return lthis._readJSON(path).pipe(function(olddoc) {
+            if (olddoc._rev === doc._rev) {
+                /* no conflict, no save */
+                return lthis._releaseLock(path).pipe(function() { return null; });
+            } else if (!lthis._olderRev(olddoc._rev, doc._rev)) {
+                /* conflict */
+                return lthis._releaseLock(path).pipe(function() { return olddoc; });
+            } else {
+                return overwrite();
+            }
+        }, function() {
+            return overwrite();
+        });
+    });
+
+    function overwrite() {
+        return lthis._fs.write(lthis._path + '/' + path, data).pipe(function() {
+            return lthis._releaseLock(path).pipe(function() {
+                return lthis._logChanges([path], [doc]).pipe(function() {
+                    return null;
+                });
+            });
+        });
+    }
+}
+LocalFileSystemDB.prototype._logChanges = function(changes, docs) {
+    var lthis = this;
+    var i = this._lastChangeSeq;
+
+    function findNextFreeChangeFile(i) {
+        return lthis._fs.exists(lthis._path + '/data/changes/' + i).pipe(function(ex) {
+            return ex ? findNextFreeChangeFile(i + 1) : i;
+        });
+    }
+    var data = JSON.stringify({type: 'local', changes: changes});
+    return this._acquireLock('data/changes').pipe(function() {
+        return findNextFreeChangeFile(lthis._lastChangeSeq + 1).pipe(function(i) {
+            lthis._changeSeqsToIgnore[i] = 1;
+            return lthis._fs.write(lthis._path + '/data/changes/' + i, data).pipe(function() {
+                return lthis._releaseLock('data/changes').pipe(function() {
+                    docs.forEach(function(doc) {
+                        lthis._trigger('change', doc);
+                    });
+                    return true;
+                });
+            });
+
+        });
+    });
+}
+LocalFileSystemDB.prototype.saveDoc = function(doc) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    return this._saveDoc(doc).pipe(function(res) {
+        if (res !== null) {
+            /* res is conflicting object */
+            return $.Deferred().reject("Conflict.", true, res).promise();
+        } else {
+            return doc;
+        }
+    });
+}
+LocalFileSystemDB.prototype.saveRevisions = function(docs) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+    var processes = $.map(docs, function(doc) {
+        return lthis._saveDoc(doc, true);
+    });
+    return DeferredSynchronizer(processes).pipe(function() {
+        /* XXX remove failed writes from this list */
+        var ids = docs.map(function(d) { return 'data/notes/' + d._id; });
+        return lthis._logChanges(ids, docs);
+        /* XXX return value and conflicts are currently ignored */
+    });
+}
+LocalFileSystemDB.prototype._genID = function() {
+    var id = '';
+    for (var i = 0; i < 32; i += 4) {
+        var part = Math.floor((Math.random() * 0x10000)).toString(16);
+        id += '0000'.substr(part.length) + part.substr(0, 4);
+    }
+    return id;
+}
+LocalFileSystemDB.prototype._getIncrementedRev = function(doc) {
+    var copy = $.extend(true, {}, doc);
+    var num = (copy._rev.split('-')[0] - 0) + 1;
+    delete copy._rev;
+
+    /* XXX use some normal form */
+    return num + '-' + MD5.hex_md5(JSON.stringify(copy));
+}
+LocalFileSystemDB.prototype._olderRev = function(reva, revb) {
+    var partsa = reva.split('-');
+    var partsb = revb.split('-');
+    return (partsa[0] < partsb[0]);
+}
+addEvents(LocalFileSystemDB, ['ready', 'change']);
 
 function InMemoryDB() {
     this._changeLog = null;
@@ -1129,7 +1500,7 @@ InMemoryDB.prototype.determineAvailableNoteRevisions = function(keys) {
 
     return $.when(available);
 }
-InMemoryDB.prototype.getAllNoteTitles = function() {
+InMemoryDB.prototype.getAllNotes = function() {
     if (!this._initialized)
         return $.Deferred().reject("Not connected to database.").promise();
 
@@ -1262,7 +1633,7 @@ InMemoryDB.prototype.saveDoc = function(doc) {
         return $.Deferred().reject("Invalid document type.").promise();
     return $.Deferred().reject("Database error.").promise();
 }
-InMemoryDB.prototype.saveDocs = function(docs) {
+InMemoryDB.prototype.saveRevisions = function(docs) {
     if (!this._initialized)
         return $.Deferred().reject("Not connected to database.").promise();
 
@@ -1352,7 +1723,7 @@ addEvents(InMemoryDB, ['ready', 'change']);
 
 var url = document.location.href;
 if (url.match(/file:\/\//)) {
-    return InMemoryDB; /* XXX or pouchdb if possible */
+    return LocalFileSystemDB;
 } else if (url.match(/\/_design\//)) {
     return CouchDB;
 } else {
@@ -1594,6 +1965,9 @@ var Note = DBObject.extend({
             this._dbObj.syncWith = {};
         }
     },
+    copy: function() {
+        return new Note(this._dbObj);
+    },
     setDBObj: function(dbObj) {
         /* headRev can be null at the first save */
         if (dbObj.type === 'note' && typeof(dbObj.title) === 'string' &&
@@ -1770,6 +2144,9 @@ var NoteRevision = DBObject.extend({
             this._dbObj.text = null;
         }
     },
+    copy: function() {
+        return new Note(this._dbObj);
+    },
     setDBObj: function(dbObj) {
         /* XXX check for sorted parents and tags
          * XXX check for hash */
@@ -1865,7 +2242,7 @@ var NoteRevision = DBObject.extend({
             if ('_id' in dbObj || '_rev' in dbObj)
                 throw new Error("Only new revisions can be saved.");
             dbObj.type = "noteRevision",
-            dbObj.note = noteID,
+            dbObj.note = noteID, /* XXX this is actually redundant */
             dbObj.date = date,
             dbObj.author = author,
             dbObj.revType = revType,
@@ -1873,7 +2250,7 @@ var NoteRevision = DBObject.extend({
             dbObj.tags = tags.sort();
             dbObj.text = text
             /* TODO enforce normal form (encoding, etc) */
-            dbObj._id = 'rev-' + MD5.hex_md5(JSON.stringify(dbObj));
+            dbObj._id = noteID + '/' + MD5.hex_md5(JSON.stringify(dbObj));
             return dbObj;
         });
     }
@@ -1905,13 +2282,13 @@ function FindCommonAncestor(note, revA, revB) {
                 var id = newIDsA[i];
                 ancestorsA[id] = true;
                 if (id in newIDsB || id in ancestorsB)
-                    return $.Deferred().resolve(id).promise();
+                    return $.when(id);
             }
             for (var i = 0; i < newIDsB.length; i ++) {
                 var id = newIDsB[i];
                 ancestorsB[id] = true;
                 if (id in ancestorsA)
-                    return $.Deferred().resolve(id).promise();
+                    return $.when(id);
             }
 
             newIDsA = getAllParents(newIDsA);
@@ -2101,6 +2478,9 @@ var SyncTarget = DBObject.extend({
             this._dbObj.remoteSeq = 0;
         }
     },
+    copy: function() {
+        return new Note(this._dbObj);
+    },
     setDBObj: function(dbObj) {
         if (dbObj.type === 'syncTarget' && typeof(dbObj.name) === 'string' &&
                     typeof(dbObj.url) === 'string' && 'remoteSeq' in dbObj) {
@@ -2190,7 +2570,7 @@ var SyncTarget = DBObject.extend({
 
                     noteBrowser.showInfo("Valid objects: " + checkedObjects.idList().length, messageBox);
                     var docList = checkedObjects.map(function(o) { return o.getDBObject(); });
-                    return dbInterface.saveDocs(docList).pipe(function(res) {
+                    return dbInterface.saveRevisions(docList).pipe(function(res) {
                             /* TODO handle conflicts and save errors,
                              * update the objects? */
 
@@ -2246,6 +2626,7 @@ var SyncTarget = DBObject.extend({
     _pushRevisions: function(revsToIgnore, messageBox) {
         var lthis = this;
         noteBrowser.showInfo("Pushing objects to remote server.", messageBox);
+        /* XXX use notebrowser */
         return dbInterface.getNotesToSync(this.getID()).pipe(function(notes) {
             var revisionObjects = [];
             /* TODO really parallel? */
