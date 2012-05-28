@@ -105,6 +105,14 @@ function addEvents(className, possibleEvents) {
 }
 
 var LocalFileInterface = (function() {
+    function urlToLocalPath(url) {
+        if (url.substr(0, 7) == "file://") {
+            return url.substr(7);
+        } else {
+            return url;
+        }
+    }
+
     function tryNetscape() {
         try {
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
@@ -120,14 +128,14 @@ var LocalFileInterface = (function() {
     function tryJava() {
         $(function() {
             $(document.body).append('<applet style="position: absolute; left: -1px;" ' +
-                                'name="TiddlySaver" code="TiddlySaver.class" ' +
-                                'archive="TiddlySaver.jar" width="1" height="1"></applet>');
+                                'name="FSAccessor" code="FSAccessor" ' +
+                                'archive="FSAccessor.jar" width="1" height="1"></applet>');
         });
         var d = $.Deferred();
         var ttl = 6000;
         function checkIfAppletInitialized() {
-            if (document.applets["TiddlySaver"] && 'saveFile' in document.applets["TiddlySaver"]) {
-                d.resolve(document.applets["TiddlySaver"]);
+            if (document.applets["FSAccessor"] && 'write' in document.applets["FSAccessor"]) {
+                d.resolve(document.applets["FSAccessor"]);
             } else {
                 ttl -= 200;
                 if (ttl < 0) {
@@ -139,6 +147,103 @@ var LocalFileInterface = (function() {
         }
         checkIfAppletInitialized();
         return d;
+    }
+
+    function readJava(path) {
+        return javaLoader.pipe(function(applet) {
+            try {
+                path = urlToLocalPath(path);
+                var data = applet.read(path + "\0\0\0\0");
+                if (data === null) {
+                    return $.Deferred().reject("File not found.").promise();
+                } else {
+                    return data;
+                }
+            } catch (e) {
+                return $.Deferred().reject(e.message).promise();
+            }
+        });
+    }
+    function writeJava(path, data) {
+        return javaLoader.pipe(function(applet) {
+            try {
+                path = urlToLocalPath(path);
+                if (applet.write(path + "\0\0\0\0", data + "\0\0\0\0") == 1) {
+                    return true;
+                } else {
+                    return $.Deferred().reject("Error writing file.").promise();
+                }
+            } catch (e) {
+                return $.Deferred().reject(e.message).promise();
+            }
+        });
+    }
+    function existsJava(path) {
+        return javaLoader.pipe(function(applet) {
+            try {
+                path = urlToLocalPath(path);
+                var ret = applet.exists(path + "\0\0\0\0");
+                if (ret == 1) {
+                    return true;
+                } else if (ret == 0) {
+                    return false;
+                } else {
+                    return $.Deferred().reject("Error accessing file.").promise();
+                }
+            } catch (e) {
+                return $.Deferred().reject(e.message).promise();
+            }
+        });
+    }
+    function listJava(path, create) {
+        return javaLoader.pipe(function(applet) {
+            try {
+                path = urlToLocalPath(path);
+                var ret = applet.list(path + "\0\0\0\0", create);
+                if (ret === null) {
+                    return $.Deferred().reject("Error listing files.").promise();
+                } else {
+                    var list = [];
+                    for (var i = 0; ret[i] !== undefined; i ++) {
+                        list[i] = ret[i];
+                    }
+                    return list;
+                }
+            } catch (e) {
+                return $.Deferred().reject(e.message).promise();
+            }
+        });
+    }
+    function acquireLockJava(path) {
+        return javaLoader.pipe(function(applet) {
+            try {
+                path = urlToLocalPath(path);
+                var ret = applet.acquireLock(path + "\0\0\0\0");
+                if (ret === 0) {
+                    return $.Deferred().reject("Error acquiring lock.").promise();
+                } else if (ret === 1) {
+                    return $.when(true);
+                } else {
+                    return $.when(false, -ret);
+                }
+            } catch (e) {
+                return $.Deferred().reject(e.message).promise();
+            }
+        });
+    }
+    function releaseLockJava(path) {
+        return javaLoader.pipe(function(applet) {
+            try {
+                path = urlToLocalPath(path);
+                if (applet.releaseLock(path + "\0\0\0\0") === 0) {
+                    return $.Deferred().reject("Error releasing lock.").promise();
+                } else {
+                    return true;
+                }
+            } catch (e) {
+                return $.Deferred().reject(e.message).promise();
+            }
+        });
     }
 
     function readNetscape(path) {
@@ -167,6 +272,7 @@ var LocalFileInterface = (function() {
     }
     function writeNetscape(path, data) {
         try {
+            path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
             var file = Components.classes["@mozilla.org/file/local;1"]
                             .createInstance(Components.interfaces.nsILocalFile);
@@ -188,6 +294,7 @@ var LocalFileInterface = (function() {
     }
     function existsNetscape(path) {
         try {
+            path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
             var file = Components.classes["@mozilla.org/file/local;1"]
                             .createInstance(Components.interfaces.nsILocalFile);
@@ -200,6 +307,7 @@ var LocalFileInterface = (function() {
     function listNetscape(path, create) {
         var files = [];
         try {
+            path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
             var dir = Components.classes["@mozilla.org/file/local;1"]
                             .createInstance(Components.interfaces.nsILocalFile);
@@ -226,6 +334,7 @@ var LocalFileInterface = (function() {
     }
     function acquireLockNetscape(path) {
         try {
+            path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
             var file = Components.classes["@mozilla.org/file/local;1"]
                             .createInstance(Components.interfaces.nsILocalFile);
@@ -243,6 +352,7 @@ var LocalFileInterface = (function() {
     }
     function releaseLockNetscape(path) {
         try {
+            path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
             var file = Components.classes["@mozilla.org/file/local;1"]
                             .createInstance(Components.interfaces.nsILocalFile);
@@ -254,52 +364,15 @@ var LocalFileInterface = (function() {
         }
     }
 
-
-    function urlToLocalPath(url) {
-        if (url.substr(0, 7) == "file://") {
-            return url.substr(7);
-        } else {
-            return url;
-        }
-    }
-
-    function readJava(path) {
-        return javaLoader.pipe(function(applet) {
-            try {
-                path = urlToLocalPath(path);
-                var data = document.applets["TiddlySaver"].loadFile(path + "\0\0\0\0", "UTF-8\0\0\0\0");
-                if (data === null) {
-                    return $.Deferred().reject("File not found.").promise();
-                } else {
-                    return data;
-                }
-            } catch (e) {
-                return $.Deferred().reject(e.message).promise();
-            }
-        });
-    }
-    function writeJava(path, data) {
-        return javaLoader.pipe(function(applet) {
-            try {
-                path = urlToLocalPath(path);
-                if (document.applets["TiddlySaver"].saveFile(path + "\0\0\0\0", "UTF-8\0\0\0\0", data + "\0\0\0\0") == 1) {
-                    return true;
-                } else {
-                    return $.Deferred().reject("Error writing file.").promise();
-                }
-            } catch (e) {
-                return $.Deferred().reject(e.message).promise();
-            }
-        });
-    }
-
     if (tryNetscape()) {
         return {read: readNetscape, write: writeNetscape, list: listNetscape,
                 exists: existsNetscape,
                 acquireLock: acquireLockNetscape, releaseLock: releaseLockNetscape};
     } else {
         javaLoader = tryJava();
-        return {read: readJava, write: writeJava};
+        return {read: readJava, write: writeJava, list: listJava,
+                exists: existsJava,
+                acquireLock: acquireLockJava, releaseLock: releaseLockJava};
     }
 
 })();
@@ -445,6 +518,7 @@ var DBObject = Class.extend({
                 }
                 return lthis;
             }, function(err, conflict) {
+                /* XXX most dbs already supply the object in the db */
                 if (conflict) {
                     return dbInterface.getDoc(lthis.getID()).pipe(function(currentDBObj) {
                         try {

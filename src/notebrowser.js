@@ -15,6 +15,7 @@ function NoteBrowser() {
     this._notesByID = null;
     this._notesByTitle = null;
     this._notesByTag = null;
+    this._notesBySyncTarget = null;
 
     var lthis = this;
     this._changeListener = null;
@@ -34,6 +35,7 @@ function NoteBrowser() {
                     lthis._notesByID = {};
                     lthis._notesByTitle = {};
                     lthis._notesByTag = {};
+                    lthis._notesBySyncTarget = {};
                     notes.forEach(function(note) { lthis._insertNote(note); });
 
                     lthis._noteList = new NoteList();
@@ -68,6 +70,12 @@ NoteBrowser.prototype._insertNote = function(note) {
             lthis._notesByTag[tag] = {};
         lthis._notesByTag[tag][id] = note;
     });
+
+    for (var targetID in note.getSyncTargets()) {
+        if (!(targetID in lthis._notesBySyncTarget))
+            lthis._notesBySyncTarget[targetID] = {};
+        lthis._notesBySyncTarget[targetID][id] = note;
+    }
 }
 NoteBrowser.prototype._removeNote = function(id) {
     var lthis = this;
@@ -79,6 +87,10 @@ NoteBrowser.prototype._removeNote = function(id) {
         if (lthis._notesByTag[tag] !== undefined)
             delete lthis._notesByTag[tag][id];
     });
+    for (var targetID in note.getSyncTargets()) {
+        if (lthis._notesBySyncTarget[targetID] !== undefined)
+            delete lthis._notesBySyncTarget[targetID][id];
+    }
     delete this._notesByTitle[note.getTitle()][id];
     delete this._notesByID[id];
 }
@@ -182,6 +194,9 @@ NoteBrowser.prototype.getNoteByTitle = function(title) {
 }
 NoteBrowser.prototype.getNotesByTag = function(tag) {
     return this._notesByTag[tag] || {};
+}
+NoteBrowser.prototype.getNotesBySyncTarget = function(syncTargetID) {
+    return this._notesBySyncTarget[syncTargetID] || {};
 }
 NoteBrowser.prototype.getAllNotes = function() {
     return this._notesByID; /* XXX copy? */
@@ -631,7 +646,8 @@ RevisionGraph.prototype._getChildrenMap = function() {
         children[id] = [];
     for (var id in this._revisions) {
         this._revisions[id].parents.forEach(function(p) {
-            children[p].push(id);
+            if (p in children)
+                children[p].push(id);
         });
     }
     return children;
@@ -726,7 +742,7 @@ RevisionGraph.prototype._updateUIElements = function() {
                 var n = noteBrowser.getNoteByID(noteID);
                 return n ? n.getTitle() : noteID;
             });
-            var shortenID = function(id) { return id.replace(/.*\//, ''); }
+            var shortenID = function(id) { return (id || '').replace(/.*\//, ''); }
             $('.date', content).text(r.date);
             $('.author', content).text(r.author);
             $('.revType', content).text(r.revType);
@@ -808,9 +824,6 @@ RevisionGraph.prototype.setCurrentRevision = function(revision, note) {
         this.redraw();
     }
 }
-
-var DBInterface = (function() {
-
 
 function PouchDB(dbName) {
 }
@@ -1035,12 +1048,13 @@ CouchDB.prototype.changedRevisions = function(noteID, since) {
                         url: '/' + this._dbName + '/_changes',
                         data: {filter: 'default/noteRevisions',
                             note: noteID,
-                            include_docs: true,
+                            include_docs: false,
                             since: since}}))
         .pipe(function(res) {
             return {lastSeq: res.last_seq,
                     revisions: $.map(res.results, function(r) {
-                        return r.doc;
+                        /* TODO */
+                        return r.doc._id;
                     })};
         }, function(req, error) {
             return "Error determining changed revisions on local serer: " + error;
@@ -1090,20 +1104,27 @@ CouchDB.prototype.saveDoc = function(doc) {
 }
 addEvents(CouchDB, ['ready', 'change']);
 
-function LocalFileSystemDB(path) {
+function LocalFileSystemDB(path, remote) {
     this._path = path || this._pathFromDocumentLocation();
     this._fs = null;
+    this._remote = remote;
+
     this._changeInterval = null;
     this._initialized = false;
     this._lastChangeSeq = 0;
     this._changeSeqsToIgnore = {};
 
-    var lthis = this;
-    window.setTimeout(function() {
-        lthis._fs = LocalFileInterface;
-        lthis._initChangeListener();
-        lthis._initMergeService();
-    }, 10);
+    this._fs = LocalFileInterface;
+
+    if (remote) {
+        this._initialized = true;
+    } else {
+        var lthis = this;
+        window.setTimeout(function() {
+            lthis._initChangeListener();
+            lthis._initMergeService();
+        }, 10);
+    }
 }
 LocalFileSystemDB.prototype._pathFromDocumentLocation = function() {
     var path = unescape(document.location.pathname);
@@ -1147,6 +1168,8 @@ LocalFileSystemDB.prototype._initChangeListener = function() {
         lthis._changeInterval = window.setInterval(checkForChanges, 1000);
         lthis._initialized = true;
         lthis._trigger('ready');
+    }, function(err) {
+        noteBrowser.showError("Error initializing database: " + err);
     });
 }
 LocalFileSystemDB.prototype._initMergeService = function() {
@@ -1232,18 +1255,30 @@ LocalFileSystemDB.prototype.getDoc = function(id) {
     if (!this._initialized)
         return $.Deferred().reject("Not connected to database.").promise();
 
+    return this._getDoc(id);
+}
+LocalFileSystemDB.prototype._getDoc = function(id) {
     if (!id.match(/^[a-zA-Z0-9\/]*$/))
         return $.Deferred().reject("Invalid document id.").promise();
 
-    var file;
+    var lthis = this;
     if (id.match(/\//)) {
         return this._readJSON('data/notes/' + id);
     } else {
         return this._readJSON('data_local/notes/' + id).pipe(null,
             function(err) {
-                return this._readJSON('data_local/syncTargets/' + id);
+                return lthis._readJSON('data_local/syncTargets/' + id);
             });
     }
+}
+LocalFileSystemDB.prototype.getDocs = function(ids) {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+    return DeferredSynchronizer($.map(ids, function(id) {
+        return lthis._getDoc(id);
+    }));
 }
 LocalFileSystemDB.prototype.getRevisionMetadata = function(noteID) {
     if (!this._initialized)
@@ -1267,16 +1302,16 @@ LocalFileSystemDB.prototype.changedRevisions = function(noteID, after) {
     var lthis = this;
     var revs = [];
     var idPrefix = 'data/notes/';
-    var notePrefix = idPrefix + noteID + '/';
+    var notePrefix = idPrefix + (noteID === null ? '' : noteID + '/');
     function getChanges(i) {
         return lthis._readJSON('data/changes/' + i).pipe(function(data) {
             data.changes.forEach(function(path) {
-                if (path.substr(0, notePrefix.length) === notePrefix)
+                if (noteID === null || path.substr(0, notePrefix.length) === notePrefix)
                     revs.push(path.substr(idPrefix.length));
             });
             return getChanges(i + 1);
         }, function() {
-            return {lastSeq: i - 1, revisions: revs};
+            return $.when({lastSeq: i - 1, revisions: revs});
         });
     }
     
@@ -1301,7 +1336,7 @@ LocalFileSystemDB.prototype._acquireLock = function(path) {
         } else {
             /* XXX message */
             console.log("Forcibly removed lock on " + path);
-            return lthis._fs.releaseLock(path + '.lock').pipe(function() {
+            return lthis._fs.releaseLock(lthis._path + '/' + path + '.lock').pipe(function() {
                 return lthis._acquireLock(path);
             });
         }
@@ -1384,20 +1419,26 @@ LocalFileSystemDB.prototype._logChanges = function(changes, docs) {
     var lthis = this;
     var i = this._lastChangeSeq;
 
+    if (changes.length === 0 && docs.length === 0) {
+        return $.when(true);
+    }
+
     function findNextFreeChangeFile(i) {
         return lthis._fs.exists(lthis._path + '/data/changes/' + i).pipe(function(ex) {
             return ex ? findNextFreeChangeFile(i + 1) : i;
         });
     }
-    var data = JSON.stringify({type: 'local', changes: changes});
+    var data = JSON.stringify({type: this._remote ? 'remote' : 'local', changes: changes});
     return this._acquireLock('data/changes').pipe(function() {
         return findNextFreeChangeFile(lthis._lastChangeSeq + 1).pipe(function(i) {
             lthis._changeSeqsToIgnore[i] = 1;
             return lthis._fs.write(lthis._path + '/data/changes/' + i, data).pipe(function() {
                 return lthis._releaseLock('data/changes').pipe(function() {
-                    docs.forEach(function(doc) {
-                        lthis._trigger('change', doc);
-                    });
+                    if (!lthis._remote) {
+                        docs.forEach(function(doc) {
+                            lthis._trigger('change', doc);
+                        });
+                    }
                     return true;
                 });
             });
@@ -1452,7 +1493,7 @@ LocalFileSystemDB.prototype._getIncrementedRev = function(doc) {
 LocalFileSystemDB.prototype._olderRev = function(reva, revb) {
     var partsa = reva.split('-');
     var partsb = revb.split('-');
-    return (partsa[0] < partsb[0]);
+    return (partsa[0] - 0 < partsb[0] - 0);
 }
 addEvents(LocalFileSystemDB, ['ready', 'change']);
 
@@ -1561,8 +1602,8 @@ InMemoryDB.prototype.changedRevisions = function(noteID, since) {
         var id = this._changeLog[i];
         if (id in this._noteRevisions) {
             var r = this._noteRevisions[id];
-            if (r.note === noteID)
-                revs.push(r);
+            if (noteID === null || r.note === noteID)
+                revs.push(id);
         }
     }
     return $.when({lastSeq: this._changeLog.length - 1,
@@ -1719,16 +1760,17 @@ InMemoryDB.prototype._autoSave = function() {
 }
 addEvents(InMemoryDB, ['ready', 'change']);
 
-/* XXX better check if couchdb is there */
+var DBInterface = (function() {
+    /* XXX better check if couchdb is there */
 
-var url = document.location.href;
-if (url.match(/file:\/\//)) {
-    return LocalFileSystemDB;
-} else if (url.match(/\/_design\//)) {
-    return CouchDB;
-} else {
-    return InMemoryDB;
-}
+    var url = document.location.href;
+    if (url.match(/file:\/\//)) {
+        return LocalFileSystemDB;
+    } else if (url.match(/\/_design\//)) {
+        return CouchDB;
+    } else {
+        return InMemoryDB;
+    }
 
 })();
 
@@ -1982,7 +2024,7 @@ var Note = DBObject.extend({
         }
     },
     getTitle: function() {
-        return this._dbObj.title;
+        return (this._dbObj.title.length === 0) ? "Note" : this._dbObj.title;
     },
     getTags: function() {
         return this._dbObj.tags || [];
@@ -2031,6 +2073,9 @@ var Note = DBObject.extend({
     },
     getHeadRevisionID: function() {
         return this._dbObj.headRev;
+    },
+    getSyncTargets: function() {
+        return this._dbObj.syncWith; /* XXX copy? */
     },
     getLocalSeq: function(syncTarget) {
         return this._dbObj.syncWith[syncTarget];
@@ -2145,7 +2190,7 @@ var NoteRevision = DBObject.extend({
         }
     },
     copy: function() {
-        return new Note(this._dbObj);
+        return new NoteRevision(this._dbObj);
     },
     setDBObj: function(dbObj) {
         /* XXX check for sorted parents and tags
@@ -2299,10 +2344,6 @@ function FindCommonAncestor(note, revA, revB) {
     });
 }
 
-/* TODO remote could also be arbitrary local or remote directory:
- * save revisions as file with name <id> and additionally a zero-length file <x>-<id>,
- * where x is a number that gets incremented by each save. 
- * */
 function SyncInterfaceCouchDB(url) {
     this._url = url;
 
@@ -2312,20 +2353,23 @@ function SyncInterfaceCouchDB(url) {
                     dataType: 'json',
                     cache: !$.browser.msie};
 }
-SyncInterfaceCouchDB.prototype.changedDocuments = function(since) {
+SyncInterfaceCouchDB.prototype.changedRevisions = function(noteID, since) {
+    /* XXX we ignore noteID */
     return $.ajax($.extend(this._ajaxOpts, {
                         url: this._url + '/_changes',
                         data: {since: since}}))
         .pipe(function(res) {
-            var docIDs = {};
+            /* XXX this should only fetch revisions and optionally check fo
+             * noteID */
+            var docIDs = [];
             res.results.forEach(function(change) {
                 var id = change.id;
                 if (!change.deleted) /* ignore deletes */
                     docIDs[id] = 1;
             });
-            return {lastSeq: res.last_seq, docIDs: docIDs};
+            return {lastSeq: res.last_seq, revisions: docIDs};
         }, function(req, error) {
-            return "Error retrieving remote changed documents: " + error;
+            return "Error retrieving remote changed revision documents: " + error;
         });
 }
 SyncInterfaceCouchDB.prototype.getDocs = function(ids) {
@@ -2335,16 +2379,14 @@ SyncInterfaceCouchDB.prototype.getDocs = function(ids) {
                         processData: false,
                         data: JSON.stringify({keys: ids})}))
         .pipe(function(res) {
-            var objs = {};
-            res.rows.forEach(function(row) {
-                objs[row.doc._id] = row.doc;
+            return res.rows.map(function(row) {
+                return row.doc;
             });
-            return objs;
         }, function(req, error) {
             return "Error retrieving remote documents: " + error;
         });
 }
-SyncInterfaceCouchDB.prototype.bulkSave = function(docs) {
+SyncInterfaceCouchDB.prototype.saveRevisions = function(docs) {
     /* TODO do we have to remove the _rev field? */
     return $.ajax($.extend(this._ajaxOpts, {
                         type: 'POST',
@@ -2360,12 +2402,14 @@ SyncInterfaceCouchDB.prototype.bulkSave = function(docs) {
 }
 
 /* interface to local filesystem without "list directory" capabilities,
- * will cause corruptions on simultaneous writes */
+ * will cause corruptions on simultaneous writes
+ * XXX superseeded by LocalFileSystemDB, but this code can still be useful
+ * for remote targets without "list directory" capabilities */
 function SyncInterfaceLocalFile(url) {
     this._url = url;
     this._lastChangeSeq = 0;
 }
-SyncInterfaceLocalFile.prototype.changedDocuments = function(since) {
+SyncInterfaceLocalFile.prototype.changedRevisions = function(noteID, since) {
     var lthis = this;
 
     var docIDs = {};
@@ -2419,7 +2463,7 @@ SyncInterfaceLocalFile.prototype.getDocs = function(ids) {
     readDoc(0);
     return d.promise();
 }
-SyncInterfaceLocalFile.prototype.bulkSave = function(docs) {
+SyncInterfaceLocalFile.prototype.saveRevisions = function(docs) {
     var lthis = this;
     var changes = [];
     var d = $.Deferred();
@@ -2461,7 +2505,7 @@ SyncInterfaceLocalFile.prototype._saveChanges = function(changes) {
 
 var getSyncInterface = function(url) {
     if (url.substr(0, 7) === 'file://') {
-        return new SyncInterfaceLocalFile(url);
+        return new LocalFileSystemDB(url, true);
     }  else {
         return new SyncInterfaceCouchDB(url);
     }
@@ -2479,7 +2523,7 @@ var SyncTarget = DBObject.extend({
         }
     },
     copy: function() {
-        return new Note(this._dbObj);
+        return new SyncTarget(this._dbObj);
     },
     setDBObj: function(dbObj) {
         if (dbObj.type === 'syncTarget' && typeof(dbObj.name) === 'string' &&
@@ -2517,17 +2561,11 @@ var SyncTarget = DBObject.extend({
         /* TODO reformat the error */
 
         noteBrowser.showInfo("Requesting changes since " + this.getRemoteSeq(), messageBox);
-        return remoteDB.changedDocuments(this.getRemoteSeq()).pipe(function(remoteChanges) {
+        return remoteDB.changedRevisions(null, this.getRemoteSeq()).pipe(function(remoteChanges) {
             /* TODO make this robust, catch exceptions and report them */
-            var idList = $.map(remoteChanges.docIDs, function(v, id) { return id; });
-
             /* XXX actually we should ask for the ids that are not missing... */
-            return dbInterface.determineAvailableNoteRevisions(idList).pipe(function(availableObjs) {
-                var objectsToFetch = [];
-                for (var id in remoteChanges.docIDs) {
-                    if (!(id in availableObjs))
-                        objectsToFetch.push(id);
-                }
+            return dbInterface.determineAvailableNoteRevisions(remoteChanges.revisions).pipe(function(availableObjs) {
+                var objectsToFetch = remoteChanges.revisions.filter(function(id) { return !(id in availableObjs); });
                 return lthis._fetchRevisions(remoteDB, objectsToFetch, remoteChanges.lastSeq, messageBox);
             });
         });
@@ -2538,17 +2576,15 @@ var SyncTarget = DBObject.extend({
         return remoteDB.getDocs(ids).pipe(function(objs) {
             var remoteObjects = new ObjectBag();
             var occuringParents = new ObjectBag();
-            for (var i = 0; i < ids.length; i ++) {
-                if (!(ids[i] in objs)) continue;
-                var o;
+            objs.forEach(function(o) {
                 try {
-                    o = new NoteRevision(objs[ids[i]]);
+                    o = new NoteRevision(o);
                 } catch(e) {
-                    continue;
+                    return;
                 }
                 remoteObjects.insert(o);
                 o.getParents().forEach(function(p) { occuringParents.insert(1, p); });
-            }
+            });
             return dbInterface.determineAvailableNoteRevisions(occuringParents.idList()).pipe(function(availableParents) {
                     var checkedObjects = new ObjectBag();
                     function objectAndParentsExist(id) {
@@ -2627,26 +2663,29 @@ var SyncTarget = DBObject.extend({
         var lthis = this;
         noteBrowser.showInfo("Pushing objects to remote server.", messageBox);
         /* XXX use notebrowser */
-        return dbInterface.getNotesToSync(this.getID()).pipe(function(notes) {
-            var revisionObjects = [];
-            /* TODO really parallel? */
-            noteBrowser.showInfo("Sync notes: " + notes.length, messageBox);
-            var processes = $.map(notes, function(note) {
-                var id = note.getID();
-                var seq = note.getLocalSeq(lthis.getID());
-                return dbInterface.changedRevisions(id, seq).pipe(function(res) {
-                    res.revisions.forEach(function(rev) {
-                        if (!revsToIgnore.hasID(rev._id))
-                            revisionObjects.push(rev);
-                    });
-                    return note.setLocalSeq(lthis.getID(), res.lastSeq);
+        var notes = noteBrowser.getNotesBySyncTarget(this.getID());
+        var revisionIDsToPush = [];
+        /* TODO really parallel? */
+        
+        /* XXX better call changedRevisions with a list of note ids */
+        var processes = $.map(notes, function(note) {
+            var id = note.getID();
+            var seq = note.getLocalSeq(lthis.getID());
+            return dbInterface.changedRevisions(id, seq).pipe(function(res) {
+                res.revisions.forEach(function(rev) {
+                    if (!revsToIgnore.hasID(rev))
+                        revisionIDsToPush.push(rev);
                 });
+                /* XXX actually this is too early */
+                return note.setLocalSeq(lthis.getID(), res.lastSeq);
             });
-            return DeferredSynchronizer(processes).pipe(function() {
-                var remoteDB = getSyncInterface(lthis.getURL());
-                noteBrowser.showInfo("Objs to push: " + revisionObjects.length, messageBox);
-                /* TODO we could have errors in some processes */
-                return remoteDB.bulkSave(revisionObjects);
+        });
+        return DeferredSynchronizer(processes).pipe(function() {
+            var remoteDB = getSyncInterface(lthis.getURL());
+            noteBrowser.showInfo("Objs to push: " + revisionIDsToPush.length, messageBox);
+            /* TODO we could have errors in some processes */
+            return dbInterface.getDocs(revisionIDsToPush).pipe(function(objs) {
+                return remoteDB.saveRevisions(objs);
             });
         });
     },
