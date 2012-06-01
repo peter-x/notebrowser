@@ -880,27 +880,38 @@ PouchDB.prototype.saveDoc = function(doc) {
     return d.promise();
 }
 
-function CouchDB() {
+function CouchDB(path, remote) {
+    this._path = path;
+    this._remote = remote;
     this._db = null;
     this._dbName = null;
 
-    var lthis = this;
-    window.setTimeout(function() {
-        lthis._dbName = unescape(document.location.href).split('/')[3];
-        lthis._init();
-    }, 10);
+    this._init();
 }
-
 CouchDB.prototype._init = function() {
     var lthis = this;
-    $.couch.urlPrefix = '';
+    if (this._path) {
+        var m = this._path.match(/(.*)\/([^\/]+)\/?/);
+        if (!m) {
+            /* XXX Where to show the error? Depends on if we are remote or not. */
+            return;
+        }
+        $.couch.urlPrefix = m[1];
+        this._dbName = m[2];
+    } else {
+        $.couch.urlPrefix = '';
+        lthis._dbName = unescape(document.location.href).split('/')[3];
+    }
     var db = $.couch.db(this._dbName);
-
-    db.info({success: function(res) {
-        lthis._db = db;
-        lthis._registerChangesFeed(res.update_seq);
-        lthis._trigger('ready');
-    }});
+    if (!this._remote) {
+        window.setTimeout(function() {
+            db.info({success: function(res) {
+                lthis._db = db;
+                lthis._registerChangesFeed(res.update_seq);
+                lthis._trigger('ready');
+            }});
+        }, 10);
+    }
 }
 CouchDB.prototype._registerChangesFeed = function(updateSeq) {
     if (!this._db)
@@ -1007,6 +1018,16 @@ CouchDB.prototype.getDoc = function(id) {
         error: function(err) { d.reject("Database error: " + err); }
     });
     return d.promise();
+}
+CouchDB.prototype.getDocs = function(ids) {
+    if (!this._db)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    /* XXX optimize that */
+    var lthis = this;
+    return DeferredSynchronizer($.map(ids, function(id) {
+        return lthis._getDoc(id);
+    }));
 }
 CouchDB.prototype.getRevisionMetadata = function(noteID) {
     if (!this._db)
@@ -2679,7 +2700,6 @@ var SyncTarget = DBObject.extend({
         });
     },
     _mergeHeadsAndUpdateDocuments: function(noteID, headRevisions, messageBox) {
-        var lthis = this;
         var lthis = this;
         if (headRevisions.length > 1) {
             /* TODO merge the revisions that are "close" */
