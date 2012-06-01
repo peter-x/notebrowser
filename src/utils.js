@@ -150,6 +150,7 @@ var LocalFileInterface = (function() {
     }
 
     function readJava(path) {
+        console.log("Request to read  " + path);
         return javaLoader.pipe(function(applet) {
             try {
                 path = urlToLocalPath(path);
@@ -165,6 +166,7 @@ var LocalFileInterface = (function() {
         });
     }
     function writeJava(path, data) {
+        console.log("Request to write " + path);
         return javaLoader.pipe(function(applet) {
             try {
                 path = urlToLocalPath(path);
@@ -179,6 +181,7 @@ var LocalFileInterface = (function() {
         });
     }
     function existsJava(path) {
+        console.log("Request to exist " + path);
         return javaLoader.pipe(function(applet) {
             try {
                 path = urlToLocalPath(path);
@@ -196,6 +199,7 @@ var LocalFileInterface = (function() {
         });
     }
     function listJava(path, create) {
+        console.log("Request to list  " + path);
         return javaLoader.pipe(function(applet) {
             try {
                 path = urlToLocalPath(path);
@@ -215,6 +219,7 @@ var LocalFileInterface = (function() {
         });
     }
     function acquireLockJava(path) {
+        console.log("Request to lock  " + path);
         return javaLoader.pipe(function(applet) {
             try {
                 path = urlToLocalPath(path);
@@ -232,6 +237,7 @@ var LocalFileInterface = (function() {
         });
     }
     function releaseLockJava(path) {
+        console.log("Request to ulock " + path);
         return javaLoader.pipe(function(applet) {
             try {
                 path = urlToLocalPath(path);

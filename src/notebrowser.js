@@ -1039,6 +1039,7 @@ CouchDB.prototype.getRevisionMetadata = function(noteID) {
     return d.promise();
 
 }
+/* XXX make this work for multiple noteIDs (change the filter) */
 CouchDB.prototype.changedRevisions = function(noteID, since) {
     var ajaxOpts = {type: 'GET',
                     dataType: 'json',
@@ -1186,7 +1187,7 @@ LocalFileSystemDB.prototype.determineAvailableNoteRevisions = function(keys) {
     var available = {};
     return DeferredSynchronizer(keys.map(function(key) {
         /* XXX sanity check for key */
-        return lthis._fs.exists('data/notes/' + key).pipe(function(res) {
+        return lthis._fs.exists(lthis._path + '/data/notes/' + key).pipe(function(res) {
                 if (res) available[key] = 1;
             });
     })).pipe(function() {
@@ -1295,6 +1296,8 @@ LocalFileSystemDB.prototype.getRevisionMetadata = function(noteID) {
         return objs;
     });
 }
+/* also works for an array of noteIDs
+ * and even for a noteID -> seqID mapping */
 LocalFileSystemDB.prototype.changedRevisions = function(noteID, after) {
     if (!this._initialized)
         return $.Deferred().reject("Not connected to database.").promise();
@@ -1302,11 +1305,35 @@ LocalFileSystemDB.prototype.changedRevisions = function(noteID, after) {
     var lthis = this;
     var revs = [];
     var idPrefix = 'data/notes/';
-    var notePrefix = idPrefix + (noteID === null ? '' : noteID + '/');
+    var matches;
+    if (noteID === null) {
+        matches = function(path) { return true; };
+    } else if ($.isArray(noteID)) {
+        var noteIDs = {};
+        noteID.forEach(function(nid) { noteIDs[nid] = 1; });
+        matches = function(path) {
+            var m = path.match(/data\/notes\/([^\/]*)/);
+            return (m && m[1] in noteIDs);
+        }
+    } else if (typeof(noteID) === 'string') {
+        var notePrefix = idPrefix + noteID + '/';
+        var prefixLength = notePrefix.length;
+        matches = function(path) { return path.substr(0, prefixLength) === noteID; };
+    } else {
+        /* assume object */
+        var after = Math.min.apply(Math, $.map(noteID, function(seq) { return seq; }));
+        matches = function(path, seq) {
+            var m = path.match(/data\/notes\/([^\/]*)/);
+            if (!m) return false;
+            var id = m[1];
+            return (id in noteID && seq > noteID[id]);
+        }
+    }
+
     function getChanges(i) {
         return lthis._readJSON('data/changes/' + i).pipe(function(data) {
             data.changes.forEach(function(path) {
-                if (noteID === null || path.substr(0, notePrefix.length) === notePrefix)
+                if (matches(path, i))
                     revs.push(path.substr(idPrefix.length));
             });
             return getChanges(i + 1);
@@ -2662,30 +2689,28 @@ var SyncTarget = DBObject.extend({
     _pushRevisions: function(revsToIgnore, messageBox) {
         var lthis = this;
         noteBrowser.showInfo("Pushing objects to remote server.", messageBox);
-        /* XXX use notebrowser */
-        var notes = noteBrowser.getNotesBySyncTarget(this.getID());
-        var revisionIDsToPush = [];
-        /* TODO really parallel? */
         
-        /* XXX better call changedRevisions with a list of note ids */
-        var processes = $.map(notes, function(note) {
-            var id = note.getID();
-            var seq = note.getLocalSeq(lthis.getID());
-            return dbInterface.changedRevisions(id, seq).pipe(function(res) {
-                res.revisions.forEach(function(rev) {
-                    if (!revsToIgnore.hasID(rev))
-                        revisionIDsToPush.push(rev);
-                });
-                /* XXX actually this is too early */
-                return note.setLocalSeq(lthis.getID(), res.lastSeq);
-            });
+        var notes = noteBrowser.getNotesBySyncTarget(this.getID());
+        var noteSeqs = {};
+        $.each(notes, function(id, note) {
+            noteSeqs[id] = note.getLocalSeq(lthis.getID());
         });
-        return DeferredSynchronizer(processes).pipe(function() {
+        return dbInterface.changedRevisions(noteSeqs).pipe(function(res) {
+            var revisionIDsToPush = [];
+            res.revisions.forEach(function(rev) {
+                if (!revsToIgnore.hasID(rev))
+                    revisionIDsToPush.push(rev);
+            });
+            var lastSeq = res.lastSeq;
             var remoteDB = getSyncInterface(lthis.getURL());
             noteBrowser.showInfo("Objs to push: " + revisionIDsToPush.length, messageBox);
             /* TODO we could have errors in some processes */
             return dbInterface.getDocs(revisionIDsToPush).pipe(function(objs) {
-                return remoteDB.saveRevisions(objs);
+                return remoteDB.saveRevisions(objs).pipe(function() {
+                    return DeferredSynchronizer($.map(notes, function(note) {
+                        return note.setLocalSeq(lthis.getID(), lastSeq);
+                    }));
+                });
             });
         });
     },
