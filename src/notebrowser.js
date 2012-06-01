@@ -539,11 +539,7 @@ NoteViewer.prototype._saveChanges = function() {
             return;
     }
     var text = $('textarea', this._editArea).val();
-    var tags = $('#editTags').val().split(',').map(function(tag) {
-            tag = tag.trim();
-            var note = noteBrowser.getNoteByID(tag) || noteBrowser.getFirstNoteByTitle(tag);
-            return note !== undefined ? note.getID() : tag;
-        });
+    var tags = this._getTagsFromInput();
 
     var lthis = this;
     /* XXX if we are viewing an old revision, then mark it as manual
@@ -1867,6 +1863,13 @@ function NoteList() {
         lthis.update();
         return false;
     });
+    $('#sortByTags').click(function() {
+        lthis._sortStyle = 'tag';
+        $('li', $('#sortByTags').closest('ul')).removeClass('active');
+        $('#sortByTags').closest('li').addClass('active');
+        lthis.update();
+        return false;
+    });
 }
 NoteList.prototype.destroy = function() {
     if (lthis._changeListener !== null)
@@ -1970,6 +1973,14 @@ NoteList.prototype._insertElement = function(element, listParent, list, reversed
 }
 NoteList.prototype._insertNote = function(note) {
     if (this._sortStyle === 'title') {
+        var l = this._getNoteLink(note, note.getTitle());
+        this._insertElement(l, $('#noteList'), $('li', '#noteList'));
+    } else if (this._sortStyle === 'tag') {
+        /* XXX actually we should also include at least one note of each
+         * unreachable circle
+         * furthermore, what about non-existing tags? */
+        if (note.getTags().length > 0)
+            return;
         var l = this._getNoteLink(note, note.getTitle());
         this._insertElement(l, $('#noteList'), $('li', '#noteList'));
     } else {
