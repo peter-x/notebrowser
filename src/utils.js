@@ -509,8 +509,10 @@ var DBObject = Class.extend({
      * changes only take effect after saving,
      * object can already be changed during conflict resolution
      * if modifier returns null, do not save (useful to prevent multiple saves
-     * of the same data) */
-    _save: function(modifier) {
+     * of the same data)
+     * options are directly passed on to dbInterface.saveDoc
+     */
+    _save: function(modifier, options) {
         var lthis = this;
 
         modifier = modifier || function(dbObj) { return dbObj; };
@@ -520,7 +522,7 @@ var DBObject = Class.extend({
         return $.when(modifier(dbObjCopy)).pipe(function(data) {
             if (data === null)
                 return lthis;
-            return dbInterface.saveDoc(data).pipe(function(res) {
+            return dbInterface.saveDoc(data, options).pipe(function(res) {
                 try {
                     lthis.setDBObj(res);
                 } catch(e) {
@@ -533,7 +535,7 @@ var DBObject = Class.extend({
                     return dbInterface.getDoc(lthis.getID()).pipe(function(currentDBObj) {
                         try {
                             lthis.setDBObj(currentDBObj);
-                            return lthis._save(modifier);
+                            return lthis._save(modifier, options);
                         } catch(e) {
                             return e.message;
                         }

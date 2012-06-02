@@ -1132,6 +1132,8 @@ function LocalFileSystemDB(path, remote) {
     this._lastChangeSeq = 0;
     this._changeSeqsToIgnore = {};
 
+    this._suppressedChangeLogEntries = [[], []];
+
     this._fs = LocalFileInterface;
 
     if (remote) {
@@ -1401,8 +1403,9 @@ LocalFileSystemDB.prototype._getPathForDoc = function(doc) {
         return null;
     }
 }
-LocalFileSystemDB.prototype._saveDoc = function(doc, dullSave) {
+LocalFileSystemDB.prototype._saveDoc = function(doc, options) {
     var lthis = this;
+    options = options || {};
 
     if (!('_id' in doc)) {
         if (doc.type === 'noteRevision') {
@@ -1411,7 +1414,7 @@ LocalFileSystemDB.prototype._saveDoc = function(doc, dullSave) {
             doc._id = this._genID();
         }
     }
-    if (!dullSave) {
+    if (!options['suppressRevCheck']) {
         if (!('_rev' in doc))
             doc._rev = '0-x';
         doc._rev = this._getIncrementedRev(doc);
@@ -1430,8 +1433,8 @@ LocalFileSystemDB.prototype._saveDoc = function(doc, dullSave) {
     } catch (e) {
         return $.Deferred().reject("Invalid data in document: " + e.message).promise();
     }
-    if (dullSave) {
-        return this._fs.write(this._path + '/' + path, data).pipe(function() { return null; });
+    if (options['suppressLocking']) {
+        return this._fs.write(this._path + '/' + path, data).pipe(logChange);
     }
     return this._acquireLock(path).pipe(function() {
         return lthis._readJSON(path).pipe(function(olddoc) {
@@ -1442,22 +1445,34 @@ LocalFileSystemDB.prototype._saveDoc = function(doc, dullSave) {
                 /* conflict */
                 return lthis._releaseLock(path).pipe(function() { return olddoc; });
             } else {
-                return overwrite();
+                return writeAndReleaseLock();
             }
         }, function() {
-            return overwrite();
+            return writeAndReleaseLock();
         });
     });
 
-    function overwrite() {
+    function writeAndReleaseLock() {
         return lthis._fs.write(lthis._path + '/' + path, data).pipe(function() {
-            return lthis._releaseLock(path).pipe(function() {
-                return lthis._logChanges([path], [doc]).pipe(function() {
-                    return null;
-                });
-            });
+            return lthis._releaseLock(path).pipe(logChange);
         });
     }
+    function logChange() {
+        if (options['suppressChangeLog']) {
+            lthis._suppressedChangeLogEntries[0].push(path);
+            lthis._suppressedChangeLogEntries[1].push(doc);
+            return null;
+        }
+        return lthis._logChanges([path], [doc]).pipe(function() {
+            return null;
+        });
+    }
+}
+LocalFileSystemDB.prototype.logSuppressedChanges = function() {
+    var changes = this._suppressedChangeLogEntries[0];
+    var docs = this._suppressedChangeLogEntries[1];
+    this._suppressedChangeLogEntries = [[], []];
+    return this._logChanges(changes, docs);
 }
 LocalFileSystemDB.prototype._logChanges = function(changes, docs) {
     var lthis = this;
@@ -1490,11 +1505,11 @@ LocalFileSystemDB.prototype._logChanges = function(changes, docs) {
         });
     });
 }
-LocalFileSystemDB.prototype.saveDoc = function(doc) {
+LocalFileSystemDB.prototype.saveDoc = function(doc, options) {
     if (!this._initialized)
         return $.Deferred().reject("Not connected to database.").promise();
 
-    return this._saveDoc(doc).pipe(function(res) {
+    return this._saveDoc(doc, options).pipe(function(res) {
         if (res !== null) {
             /* res is conflicting object */
             return $.Deferred().reject("Conflict.", true, res).promise();
@@ -1508,13 +1523,12 @@ LocalFileSystemDB.prototype.saveRevisions = function(docs) {
         return $.Deferred().reject("Not connected to database.").promise();
 
     var lthis = this;
-    var processes = $.map(docs, function(doc) {
-        return lthis._saveDoc(doc, true);
-    });
-    return DeferredSynchronizer(processes).pipe(function() {
-        /* XXX remove failed writes from this list */
-        var ids = docs.map(function(d) { return 'data/notes/' + d._id; });
-        return lthis._logChanges(ids, docs);
+    return DeferredSynchronizer($.map(docs, function(doc) {
+        return lthis._saveDoc(doc, {'suppressChangeLog': true,
+                                    'suppressRevCheck': true,
+                                    'suppressLocking': true});
+    })).pipe(function() {
+        return lthis.logSuppressedChanges();
         /* XXX return value and conflicts are currently ignored */
     });
 }
@@ -2203,14 +2217,14 @@ var Note = DBObject.extend({
             });
         });
     },
-    setLocalSeq: function(syncTarget, seq) {
+    setLocalSeq: function(syncTarget, seq, options) {
         return this._save(function(dbObj) {
             if (syncTarget in dbObj.syncWith && dbObj.syncWith[syncTarget] === seq)
                 return null;
             var s = dbObj.syncWith[syncTarget] || 0;
             dbObj.syncWith[syncTarget] = Math.max(s, seq);
             return dbObj;
-        });
+        }, options);
     }
 });
 /* static */
@@ -2742,8 +2756,10 @@ var SyncTarget = DBObject.extend({
             return dbInterface.getDocs(revisionIDsToPush).pipe(function(objs) {
                 return remoteDB.saveRevisions(objs).pipe(function() {
                     return DeferredSynchronizer($.map(notes, function(note) {
-                        return note.setLocalSeq(lthis.getID(), lastSeq);
-                    }));
+                        return note.setLocalSeq(lthis.getID(), lastSeq, {'suppressChangeLog': true});
+                    })).pipe(function() {
+                        return dbInterface.logSuppressedChanges();
+                    });
                 });
             });
         });
