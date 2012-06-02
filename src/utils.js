@@ -507,7 +507,9 @@ var DBObject = Class.extend({
     /* modifier is function that takes a copy of this._dbObj and returns
      * modified db object (or promise),
      * changes only take effect after saving,
-     * object can already be changed during conflict resolution */
+     * object can already be changed during conflict resolution
+     * if modifier returns null, do not save (useful to prevent multiple saves
+     * of the same data) */
     _save: function(modifier) {
         var lthis = this;
 
@@ -516,6 +518,8 @@ var DBObject = Class.extend({
         var dbObjCopy = $.extend(true, {}, this._dbObj);
 
         return $.when(modifier(dbObjCopy)).pipe(function(data) {
+            if (data === null)
+                return lthis;
             return dbInterface.saveDoc(data).pipe(function(res) {
                 try {
                     lthis.setDBObj(res);
@@ -542,6 +546,8 @@ var DBObject = Class.extend({
     },
     _setAndSave: function(attr, value) {
         return this._save(function(dbObj) {
+            if (dbObj[attr] && dbObj[attr] === value)
+                return null;
             dbObj[attr] = value;
             return dbObj;
         });

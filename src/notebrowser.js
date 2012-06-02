@@ -1998,10 +1998,11 @@ NoteList.prototype._insertNote = function(note) {
         this._insertElement(l, $('#noteList'), $('li', '#noteList'));
     } else if (this._sortStyle === 'tag') {
         /* XXX actually we should also include at least one note of each
-         * unreachable circle
-         * furthermore, what about non-existing tags? */
-        if (note.getTags().length > 0)
-            return;
+         * unreachable cycle */
+        var tagExists = function(tag) {
+            return noteBrowser.getNoteByID(tag) !== undefined;
+        }
+        if (note.getTags().some(tagExists)) return;
         var l = this._getNoteLink(note, note.getTitle());
         this._insertElement(l, $('#noteList'), $('li', '#noteList'));
     } else {
@@ -2204,6 +2205,8 @@ var Note = DBObject.extend({
     },
     setLocalSeq: function(syncTarget, seq) {
         return this._save(function(dbObj) {
+            if (syncTarget in dbObj.syncWith && dbObj.syncWith[syncTarget] === seq)
+                return null;
             var s = dbObj.syncWith[syncTarget] || 0;
             dbObj.syncWith[syncTarget] = Math.max(s, seq);
             return dbObj;
@@ -2747,6 +2750,8 @@ var SyncTarget = DBObject.extend({
     },
     _setRemoteSeq: function(remoteSeq) {
         return this._save(function(dbObj) {
+            if (dbObj.remoteSeq === remoteSeq)
+                return null;
             var s = dbObj.remoteSeq || 0;
             dbObj.remoteSeq = Math.max(s, remoteSeq);
             return dbObj;
