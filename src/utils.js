@@ -139,7 +139,7 @@ var LocalFileInterface = (function() {
             } else {
                 ttl -= 200;
                 if (ttl < 0) {
-                    d.reject();
+                    d.reject("Error running or accessing Java applet.");
                 } else {
                     window.setTimeout(checkIfAppletInitialized, 200);
                 }

@@ -659,7 +659,8 @@ RevisionGraph.prototype._updateHierarchy = function() {
     var cont = true;
     var maxColumn = 0;
 
-    while (cont) {
+    /* XXX detect loops */
+    while (cont && x < 100) {
         cont = false;
         var nextQueue = {};
         var thisColumn = [];
@@ -1141,8 +1142,8 @@ function LocalFileSystemDB(path, remote) {
     } else {
         var lthis = this;
         window.setTimeout(function() {
-            lthis._initChangeListener();
             lthis._initMergeService();
+            lthis._initChangeListener();
         }, 10);
     }
 }
@@ -1166,8 +1167,10 @@ LocalFileSystemDB.prototype._initChangeListener = function() {
             /* XXX what if it exists but is still empty? */
             if (!ex) return;
             lthis._lastChangeSeq = Math.max(lthis._lastChangeSeq, i);
-            if (lthis._changeSeqsToIgnore[i])
+            if (lthis._changeSeqsToIgnore[i]) {
+                delete lthis._changeSeqsToIgnore[i];
                 return;
+            }
             lthis._readJSON('data/changes/' + i).done(function(change) {
                 change.changes.forEach(function(path) {
                     lthis._readJSON(path).done(function(doc) {
@@ -1193,10 +1196,53 @@ LocalFileSystemDB.prototype._initChangeListener = function() {
     });
 }
 LocalFileSystemDB.prototype._initMergeService = function() {
-    /* XXX
-     * read "/data_local/lastSaneChange", extract last checked change sequence and check newer
-     * changes for consistency and merge them if necessary. */
-    /* XXX wait for ready signal? */
+    var lthis = this;
+    var dataFile = 'data_local/remoteChangesMergedUntil';
+    var runningMyself = false;
+    var mergeChanges = function() {
+        if (runningMyself) return;
+        runningMyself = true;
+        lthis._acquireLock(dataFile).pipe(function() {
+            lthis._readJSON(dataFile)
+                .pipe(function(data) { return mergeAfter(data || 0); },
+                      function() { return mergeAfter(0); })
+                .done(function() {
+                    lthis._releaseLock(dataFile);
+                    runningMyself = false;
+                });
+        });
+    }
+    var mergeAfter = function(seq) {
+        return lthis.changedRevisions(null, seq, true).pipe(function(res) {
+            if (res.lastSeq === seq)
+                return;
+            return lthis.getDocs(res.revisions).pipe(function(revData) {
+                if (revData.length === 0)
+                    return;
+                var revisions = [];
+                revData.forEach(function(o) {
+                    try {
+                        o = new NoteRevision(o);
+                    } catch(e) {
+                        return;
+                    }
+                    revisions.push(o);
+                });
+                var headRevisions = NoteRevision.determineHeadRevisions(revisions);
+                return DeferredSynchronizer($.map(headRevisions, function(revisions, noteID) {
+                    /* TODO merge these in one change file */
+                    return Note.mergeHeadsAndUpdate(noteID, revisions);
+                })).pipe(function() {
+                    return lthis._fs.write(lthis._path + '/' + dataFile, '' + res.lastSeq);
+                });
+            });
+        });
+    }
+
+    /* XXX use a flag that indicates if the change was a remote change, then the
+     * change file is read only once */
+    this.on('change', mergeChanges);
+    this.on('ready', mergeChanges);
 }
 LocalFileSystemDB.prototype.determineAvailableNoteRevisions = function(keys) {
     if (!this._initialized)
@@ -1315,9 +1361,9 @@ LocalFileSystemDB.prototype.getRevisionMetadata = function(noteID) {
         return objs;
     });
 }
-/* also works for an array of noteIDs
+/* noteID can be: note also works for an array of noteIDs
  * and even for a noteID -> seqID mapping */
-LocalFileSystemDB.prototype.changedRevisions = function(noteID, after) {
+LocalFileSystemDB.prototype.changedRevisions = function(noteID, after, onlyRemoteChanges) {
     if (!this._initialized)
         return $.Deferred().reject("Not connected to database.").promise();
 
@@ -1326,7 +1372,7 @@ LocalFileSystemDB.prototype.changedRevisions = function(noteID, after) {
     var idPrefix = 'data/notes/';
     var matches;
     if (noteID === null) {
-        matches = function(path) { return true; };
+        matches = function(path) { return path.substr(0, idPrefix.length) === idPrefix; };
     } else if ($.isArray(noteID)) {
         var noteIDs = {};
         noteID.forEach(function(nid) { noteIDs[nid] = 1; });
@@ -1351,10 +1397,12 @@ LocalFileSystemDB.prototype.changedRevisions = function(noteID, after) {
 
     function getChanges(i) {
         return lthis._readJSON('data/changes/' + i).pipe(function(data) {
-            data.changes.forEach(function(path) {
-                if (matches(path, i))
-                    revs.push(path.substr(idPrefix.length));
-            });
+            if (!onlyRemoteChanges || data.type === 'remote') {
+                data.changes.forEach(function(path) {
+                    if (matches(path, i))
+                        revs.push(path.substr(idPrefix.length));
+                });
+            }
             return getChanges(i + 1);
         }, function() {
             return $.when({lastSeq: i - 1, revisions: revs});
@@ -2245,9 +2293,30 @@ Note.createWithExistingRevision = function(id, revObj, syncTarget) {
             dbObj.title = revObj.getTitle();
             dbObj.tags = revObj.getTags();
             dbObj.date = revObj.getDate();
-            dbObj.syncWith[syncTarget] = 0;
+            if (syncTarget === undefined) {
+                dbObj.syncWith = {};
+            } else {
+                dbObj.syncWith[syncTarget] = 0;
+            }
             return dbObj;
         }
+    });
+}
+Note.mergeHeadsAndUpdate = function(noteID, headRevisions) {
+    var lthis = this;
+    if (headRevisions.length > 1) {
+        /* TODO merge the revisions that are "close" */
+        return headRevisions[0].createMergedRevision(headRevisions[1]).pipe(function(newRevObj) {
+            var newHeads = headRevisions.splice(2);
+            newHeads.push(newRevObj);
+            return Note.mergeHeadsAndUpdate(noteID, newHeads);
+        });
+    }
+    return (new Note(noteID)).getConstructorPromise().pipe(function(note) {
+        return note.mergeWithRevision(headRevisions[0]);
+    }, function() {
+        console.log("Creating new Note: " + noteID);
+        return Note.createWithExistingRevision(noteID, headRevisions[0]);
     });
 }
 
@@ -2313,6 +2382,7 @@ var NoteRevision = DBObject.extend({
     createMergedRevision: function(otherRev) {
         var lthis = this;
         return this._findCommonAncestor(otherRev).pipe(function(parentId) {
+            /* XXX if no common ancestor is found, use the empty revision */
             if (parentId === lthis.getID()) return otherRev;
             if (parentId === otherRev.getID()) return lthis;
             return (new NoteRevision(parentId)).getConstructorPromise().pipe(function(parentRev) {
@@ -2356,7 +2426,7 @@ var NoteRevision = DBObject.extend({
                     return $.when(pA[i]);
 
         /* now hand it over to the professionals */
-        return FindCommonAncestor(this.getNoteID(), this.getID(), otherRev.getID());
+        return NoteRevision.findCommonAncestor(this.getNoteID(), this.getID(), otherRev.getID());
     },
     save: function(noteID, text, tags, author, date, revType, parents) {
         return this._save(function(dbObj) {
@@ -2377,8 +2447,26 @@ var NoteRevision = DBObject.extend({
     }
 });
 
-
-function FindCommonAncestor(note, revA, revB) {
+/* static */
+NoteRevision.determineHeadRevisions = function(revisions) {
+    var nonHeadRevisions = {};
+    revisions.forEach(function(o) {
+        o.getParents().forEach(function(pID) {
+            nonHeadRevisions[pID] = 1;
+        });
+    });
+    var headRevisions = {};
+    revisions.forEach(function(o) {
+        if (o.getID() in nonHeadRevisions)
+            return;
+        var noteID = o.getNoteID();
+        if (!(noteID in headRevisions))
+            headRevisions[noteID] = [];
+        headRevisions[noteID].push(o);
+    });
+    return headRevisions;
+}
+NoteRevision.findCommonAncestor = function(note, revA, revB) {
     return dbInterface.getRevisionMetadata(note).pipe(function(revisions) {
         var ancestorsA = {};
         var ancestorsB = {};
@@ -2416,6 +2504,7 @@ function FindCommonAncestor(note, revA, revB) {
             newIDsB = getAllParents(newIDsB);
         }
 
+        /* XXX use some empty parent in this case */
         return $.Deferred().reject("No common parent found.").promise();
     });
 }
@@ -2663,6 +2752,10 @@ var SyncTarget = DBObject.extend({
             });
             return dbInterface.determineAvailableNoteRevisions(occuringParents.idList()).pipe(function(availableParents) {
                     var checkedObjects = new ObjectBag();
+                    /* XXX replace checking by less redundant data file,
+                     * do not even check if parents exist.
+                     * note that in this case, we could request a merge without
+                     * a common ancestor! */
                     function objectAndParentsExist(id) {
                         if (checkedObjects.hasID(id) || id in availableParents) return true;
                         var obj = remoteObjects.get(id);
@@ -2686,26 +2779,14 @@ var SyncTarget = DBObject.extend({
                             /* TODO handle conflicts and save errors,
                              * update the objects? */
 
-                            var nonHeadRevisions = {};
-                            checkedObjects.each(function(id, o) {
-                                o.getParents().forEach(function(pID) {
-                                    nonHeadRevisions[pID] = 1;
-                                });
-                            });
-                            var headRevisions = {};
-                            checkedObjects.each(function(id, o) {
-                                if (id in nonHeadRevisions)
-                                    return;
-                                var noteID = o.getNoteID();
-                                if (!(noteID in headRevisions))
-                                    headRevisions[noteID] = [];
-                                headRevisions[noteID].push(o);
-                            });
-
-
                             /* TODO really do this in parallel? */
-                            var processes = $.map(headRevisions, function(revisions, noteID) {
-                                return lthis._mergeHeadsAndUpdateDocuments(noteID, revisions, messageBox);
+                            var processes = $.map(NoteRevision.determineHeadRevisions(checkedObjects.objectList()),
+                                                    function(revisions, noteID) {
+                                /* TODO we do not want arbitrary people to cause
+                                 * our notes to be merged we do not have marked
+                                 * to be synchronized */
+                                /* TODO merge these in one change file */
+                                return Note.mergeHeadsAndUpdate(noteID, revisions);
                             });
                             processes.push(lthis._setRemoteSeq(lastSeq));
                             return DeferredSynchronizer(processes).pipe(function() {
@@ -2714,24 +2795,6 @@ var SyncTarget = DBObject.extend({
                             });
                         });
                 });
-        });
-    },
-    _mergeHeadsAndUpdateDocuments: function(noteID, headRevisions, messageBox) {
-        var lthis = this;
-        if (headRevisions.length > 1) {
-            /* TODO merge the revisions that are "close" */
-            return headRevisions[0].createMergedRevision(headRevisions[1]).pipe(function(newRevObj) {
-                var newHeads = headRevisions.splice(2);
-                newHeads.push(newRevObj);
-                return lthis._mergeHeadsAndUpdateDocuments(noteID, newHeads);
-            });
-        }
-        return (new Note(noteID)).getConstructorPromise().pipe(function(note) {
-            if (note.getLocalSeq(lthis.getID()) === undefined) return 1;
-            return note.mergeWithRevision(headRevisions[0]);
-        }, function() {
-            noteBrowser.showInfo("Creating: " + noteID, messageBox);
-            return Note.createWithExistingRevision(noteID, headRevisions[0], lthis.getID());
         });
     },
     _pushRevisions: function(revsToIgnore, messageBox) {
