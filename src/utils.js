@@ -1,3 +1,6 @@
+if (!window.console) {
+    window.console = {log: function() {}};
+}
 /* Simple JavaScript Inheritance
  * By John Resig http://ejohn.org/
  * MIT Licensed.
@@ -253,6 +256,7 @@ var LocalFileInterface = (function() {
     }
 
     function readNetscape(path) {
+        console.log("Request to read  " + path);
         try {
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
             var file = Components.classes["@mozilla.org/file/local;1"]
@@ -277,6 +281,7 @@ var LocalFileInterface = (function() {
         }
     }
     function writeNetscape(path, data) {
+        console.log("Request to write " + path);
         try {
             path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
@@ -299,6 +304,7 @@ var LocalFileInterface = (function() {
         }
     }
     function existsNetscape(path) {
+        console.log("Request to exist " + path);
         try {
             path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
@@ -311,6 +317,7 @@ var LocalFileInterface = (function() {
         }
     }
     function listNetscape(path, create) {
+        console.log("Request to list  " + path);
         var files = [];
         try {
             path = urlToLocalPath(path);
@@ -339,6 +346,7 @@ var LocalFileInterface = (function() {
         }
     }
     function acquireLockNetscape(path) {
+        console.log("Request to lock  " + path);
         try {
             path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
@@ -357,6 +365,7 @@ var LocalFileInterface = (function() {
         }
     }
     function releaseLockNetscape(path) {
+        console.log("Request to ulock " + path);
         try {
             path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");

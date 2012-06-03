@@ -123,6 +123,8 @@ NoteBrowser.prototype._init = function() {
             .done(function(note) {
                 lthis._noteViewer.showEditNote(note);
                 lthis.currentNoteID.set(note.getID());
+                $('#noteNavigation').addClass('hidden-phone');
+                $('#noteArea').show();
             });
     });
     $('#newSyncButton').click(function() {
@@ -134,6 +136,12 @@ NoteBrowser.prototype._init = function() {
 
         SyncTarget.create(name, url)
             .fail(function(err) { noteBrowser.showError(err); });
+    });
+    $('#showNoteNavigationButton').click(function() {
+        lthis.currentNoteID.set(null);
+        lthis._noteViewer.closeNote();
+        $('#noteNavigation').removeClass('hidden-phone');
+        $('#noteArea').hide();
     });
 }
 NoteBrowser.prototype.showError = function(message) {
@@ -210,6 +218,8 @@ NoteBrowser.prototype._showNote = function(id) {
     /* XXX give noteViewer a chance to ask the user if the current note should
      * be closed */
     this._noteViewer.showNote(this.getNoteByID(id));
+    $('#noteNavigation').addClass('hidden-phone');
+    $('#noteArea').show();
 }
 
 function NoteViewer() {
@@ -222,7 +232,6 @@ function NoteViewer() {
     this._buttonEdit = null;
     this._buttonSave = null;
     this._buttonCancel = null;
-    this._buttonRevisionGraph = null;
 
     this._revisionGraphArea = null;
     this._syncTableArea = null;
@@ -284,13 +293,16 @@ NoteViewer.prototype._findUIElements = function() {
         .click(function() { lthis._cancelChanges(); });
     this._buttonSave = $('#viewSaveButton')
         .click(function() { lthis._saveChanges(); });
-    this._buttonRevisionGraph = $('#viewRevisionGraphButton')
+    $('#viewRevisionGraphButton')
         .click(function() { lthis._toggleRevisionGraph(); });
+    $('#viewSyncTargetsButton')
+        .click(function() { lthis._toggleSyncTargets(); });
 
     this._revisionGraphArea = $('#revisionGraphArea')
         .hide();
 
-    this._syncTableArea = $('#syncTableArea');
+    this._syncTableArea = $('#syncTableArea')
+        .hide();
 
     this._editArea = $('#editArea');
     this._viewArea = $('#viewArea');
@@ -405,10 +417,15 @@ NoteViewer.prototype._doRender = function(math) {
     this._viewAreaText
         .empty()
         .append(this._showdown.makeHtml(text));
-    if (math)
+    if (math && MathJax)
         MathJax.Hub.Queue(["Typeset", MathJax.Hub, this._viewAreaText[0]]);
 
     this._lastRenderDuration = (new Date()) - start;
+}
+NoteViewer.prototype.closeNote = function() {
+    this._note = null;
+    this._revision = null;
+    this._revisionGraph = null;
 }
 NoteViewer.prototype.showNote = function(note, revision) {
     var noteChange = !this._note || this._note.getID() !== note.getID();
@@ -500,7 +517,7 @@ NoteViewer.prototype._toViewMode = function() {
 NoteViewer.prototype._updateSyncTable = function() {
     var lthis = this;
     this._syncTableArea.empty();
-    /* XXX do we need to call this each time? */
+    /* XXX store them in NoteBrowser */
     dbInterface.getAllSyncTargets()
         .done(function(targets) {
             var table = $('<table class="table table-striped table-bordered"><thead>' +
@@ -571,6 +588,9 @@ NoteViewer.prototype._toggleRevisionGraph = function() {
     } else {
         this._revisionGraphArea.toggle('slow');
     }
+}
+NoteViewer.prototype._toggleSyncTargets = function() {
+    this._syncTableArea.toggle('slow');
 }
 
 function RevisionGraph(noteViewer, note, revision, container) {
@@ -1977,7 +1997,8 @@ NoteList.prototype._getNoteLink = function(note, sortKey) {
 NoteList.prototype._setListHilight = function(id) {
     $('#noteList li').removeClass('active');
     /* XXX how to escape? */
-    $('#noteList_' + id).addClass('active');
+    if (id !== null)
+        $('#noteList_' + id).addClass('active');
 }
 NoteList.prototype._installChangeListener = function() {
     var lthis = this;
