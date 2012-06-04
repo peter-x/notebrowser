@@ -1241,8 +1241,6 @@ LocalFileSystemDB.prototype._initMergeService = function() {
             if (res.lastSeq === seq)
                 return;
             return lthis.getDocs(res.revisions).pipe(function(revData) {
-                if (revData.length === 0)
-                    return;
                 var revisions = [];
                 revData.forEach(function(o) {
                     try {
