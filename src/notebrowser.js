@@ -417,8 +417,8 @@ NoteViewer.prototype._doRender = function(math) {
     this._viewAreaText
         .empty()
         .append(this._showdown.makeHtml(text));
-    if (math && MathJax)
-        MathJax.Hub.Queue(["Typeset", MathJax.Hub, this._viewAreaText[0]]);
+    if (math && window.MathJax)
+        window.MathJax.Hub.Queue(["Typeset", MathJax.Hub, this._viewAreaText[0]]);
 
     this._lastRenderDuration = (new Date()) - start;
 }
