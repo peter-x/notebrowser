@@ -422,6 +422,9 @@ NoteViewer.prototype._doRender = function(math) {
         window.MathJax.Hub.Queue(["Typeset", MathJax.Hub, this._viewAreaText[0]]);
 
     this._lastRenderDuration = (new Date()) - start;
+    if (this._editMode) {
+        $('textarea', this._editArea).height(Math.max(800, $('#viewAreaText').height()));
+    }
 }
 NoteViewer.prototype.closeNote = function() {
     this._note = null;
