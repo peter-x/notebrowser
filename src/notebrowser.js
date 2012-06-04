@@ -105,7 +105,8 @@ NoteBrowser.prototype._init = function() {
             return;
         var note = lthis.getNoteByID(hash) || lthis.getFirstNoteByTitle(hash);
         if (note === undefined) {
-            document.location.hash = '#' + lthis.currentNoteID.get();
+            var curID = lthis.currentNoteID.get();
+            document.location.hash = curID === null ? '' : '#' + curID;
             noteBrowser.showError("Note " + hash + " not found.");
             return false;
         }
