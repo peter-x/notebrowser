@@ -267,12 +267,16 @@ var LocalFileInterface = (function() {
             var inputStream = Components.classes["@mozilla.org/network/file-input-stream;1"]
                                 .createInstance(Components.interfaces.nsIFileInputStream);
             inputStream.init(file, 0x01, 0x04, null);
-            var sInputStream = Components.classes["@mozilla.org/scriptableinputstream;1"]
-                                .createInstance(Components.interfaces.nsIScriptableInputStream);
-            sInputStream.init(inputStream);
-            /* XXX use asynchronous IO */
-            var contents = sInputStream.read(sInputStream.available());
-            sInputStream.close();
+            var contents = '';
+            var convStream = Components.classes["@mozilla.org/intl/converter-input-stream;1"]
+                                .createInstance(Components.interfaces.nsIConverterInputStream);
+            convStream.init(inputStream, null, 0, 0);
+            var o = {};
+            while (convStream.readString(0x1ffffff, o) > 0) {
+                contents += o.value;
+                o = {};
+            }
+            convStream.close();
             inputStream.close();
 
             return $.when(contents);
@@ -293,9 +297,12 @@ var LocalFileInterface = (function() {
             var outputStream = Components.classes["@mozilla.org/network/file-output-stream;1"]
                             .createInstance(Components.interfaces.nsIFileOutputStream);
             outputStream.init(file, 0x22, 0x04, null);
-
+            var convStream = Components.classes["@mozilla.org/intl/converter-output-stream;1"]
+                                .createInstance(Components.interfaces.nsIConverterOutputStream);
+            convStream.init(outputStream, null, 0, 0);
             /* XXX use asynchronous IO */
-            outputStream.write(data, data.length);
+            convStream.write(data, data.length);
+            convStream.close();
             outputStream.close();
 
             return $.when(true);
