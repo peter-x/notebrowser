@@ -301,7 +301,7 @@ var LocalFileInterface = (function() {
                                 .createInstance(Components.interfaces.nsIConverterOutputStream);
             convStream.init(outputStream, null, 0, 0);
             /* XXX use asynchronous IO */
-            convStream.write(data, data.length);
+            convStream.writeString(data);
             convStream.close();
             outputStream.close();
 
