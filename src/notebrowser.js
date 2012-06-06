@@ -1604,9 +1604,9 @@ LocalFileSystemDB.prototype.saveRevisions = function(docs) {
 }
 LocalFileSystemDB.prototype._genID = function() {
     var id = '';
-    for (var i = 0; i < 32; i += 4) {
-        var part = Math.floor((Math.random() * 0x10000)).toString(16);
-        id += '0000'.substr(part.length) + part.substr(0, 4);
+    var chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    for (var i = 0; i < 22; i ++) {
+        id += chars[Math.floor((Math.random() * chars.length))];
     }
     return id;
 }
@@ -1616,7 +1616,7 @@ LocalFileSystemDB.prototype._getIncrementedRev = function(doc) {
     delete copy._rev;
 
     /* XXX use some normal form */
-    return num + '-' + MD5.hex_md5(JSON.stringify(copy));
+    return num + '-' + Crypto.md5(JSON.stringify(copy));
 }
 LocalFileSystemDB.prototype._olderRev = function(reva, revb) {
     var partsa = reva.split('-');
@@ -1826,7 +1826,7 @@ InMemoryDB.prototype._getIncrementedRev = function(doc) {
     var num = (copy._rev.split('-')[0] - 0) + 1;
 
     /* XXX use some normal form */
-    return num + '-' + MD5.hex_md5(JSON.stringify(copy));
+    return num + '-' + Crypto.md5(JSON.stringify(copy));
 }
 InMemoryDB.prototype._olderRev = function(reva, revb) {
     var partsa = reva.split('-');
@@ -2464,7 +2464,7 @@ var NoteRevision = DBObject.extend({
             dbObj.tags = tags.sort();
             dbObj.text = text
             /* TODO enforce normal form (encoding, etc) */
-            dbObj._id = noteID + '/' + MD5.hex_md5(JSON.stringify(dbObj));
+            dbObj._id = noteID + '/' + Crypto.md5(JSON.stringify(dbObj));
             return dbObj;
         });
     }
