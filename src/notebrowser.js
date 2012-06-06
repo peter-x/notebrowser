@@ -246,6 +246,7 @@ function NoteViewer() {
 
     this._syncTable = null;
     this._revisionGraph = null;
+    this._revisionGraphVisible = false;
 
     this._findUIElements();
 
@@ -429,28 +430,39 @@ NoteViewer.prototype._doRender = function(math) {
 NoteViewer.prototype.closeNote = function() {
     this._note = null;
     this._revision = null;
-    this._revisionGraph = null;
+    if (this._revisionGraph !== null) {
+        this._revisionGraph.destroy();
+        this._revisionGraph = null;
+    }
+    this._viewAreaTags.empty();
+    this._viewAreaSubtags.empty();
+    this._viewAreaTags.empty();
 }
 NoteViewer.prototype.showNote = function(note, revision) {
-    var noteChange = !this._note || this._note.getID() !== note.getID();
-    this._note = note.copy();
-    this._revision = revision;
-    if (this._revisionGraph !== null)
-        this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision,
-                                               noteChange ? note : undefined);
-    this._updateSyncTable();
-    this._toViewMode();
+    this._showNote(note, revision, false);
 }
 NoteViewer.prototype.showEditNote = function(note, revision) {
+    this._showNote(note, revision, true);
+}
+NoteViewer.prototype._showNote = function(note, revision, edit) {
     var noteChange = !this._note || this._note.getID() !== note.getID();
-    /* XXX clear the view areas (they can contain an old note) */
+    if (noteChange)
+        this.closeNote();
     this._note = note.copy();
     this._revision = revision;
-    if (this._revisionGraph !== null)
+
+    if (this._revisionGraphVisible && this._revisionGraph === null) {
+        this._createRevisionGraph();
+    } else if (this._revisionGraph !== null) {
         this._revisionGraph.setCurrentRevision(revision === undefined ? this._note.getHeadRevisionID() : revision,
                                                noteChange ? note : undefined);
+    }
     this._updateSyncTable();
-    this._toEditMode();
+    if (edit) {
+        this._toEditMode();
+    } else {
+        this._toViewMode();
+    }
 }
 NoteViewer.prototype.showRevision = function(rev) {
     this._revision = rev;
@@ -581,17 +593,21 @@ NoteViewer.prototype._cancelChanges = function() {
 }
 NoteViewer.prototype._toggleRevisionGraph = function() {
     var lthis = this;
+    this._revisionGraphVisible = !this._revisionGraphVisible;
     if (this._revisionGraph === null) {
-        var rev = this._revision;
-        if (rev === undefined)
-            rev = this._note.getHeadRevisionID();
-        this._revisionGraph = new RevisionGraph(this, this._note, rev, this._revisionGraphArea);
+        this._createRevisionGraph();
         this._revisionGraphArea.show('slow', function() {
             lthis._revisionGraph.redraw();
         });
     } else {
         this._revisionGraphArea.toggle('slow');
     }
+}
+NoteViewer.prototype._createRevisionGraph = function() {
+    var rev = this._revision;
+    if (rev === undefined)
+        rev = this._note.getHeadRevisionID();
+    this._revisionGraph = new RevisionGraph(this, this._note, rev, this._revisionGraphArea);
 }
 NoteViewer.prototype._toggleSyncTargets = function() {
     this._syncTableArea.toggle('slow');
@@ -628,6 +644,7 @@ function RevisionGraph(noteViewer, note, revision, container) {
 RevisionGraph.prototype.destroy = function() {
     /* TODO make sure this gets called */
     dbInterface.off('change', this._changeListener);
+    this._container.empty();
 }
 RevisionGraph.prototype._installChangeListener = function() {
     var lthis = this;
