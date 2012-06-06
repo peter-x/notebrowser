@@ -16,6 +16,7 @@ function NoteBrowser() {
     this._notesByTitle = null;
     this._notesByTag = null;
     this._notesBySyncTarget = null;
+    this._syncTargetsByID = null;
 
     var lthis = this;
     this._changeListener = null;
@@ -23,20 +24,27 @@ function NoteBrowser() {
     window.setTimeout(function() {
         lthis._changeListener = dbInterface.on('change', function(doc) {
             if (doc.type && doc.type === 'syncTarget') {
-                lthis._updateSyncTargetButton(new SyncTarget(doc));
+                var t = new SyncTarget(doc);
+                lthis._syncTargetsByID[doc._id] = t;
+                lthis._updateSyncTargetButton(t);
             } else if (doc.type && doc.type === 'note') {
                 lthis._removeNote(doc._id);
                 lthis._insertNote(new Note(doc));
             }
         });
         dbInterface.on('ready', function() {
-            dbInterface.getAllNotes()
-                .done(function(notes) {
+            $.when(dbInterface.getAllNotes(), dbInterface.getAllSyncTargets())
+                .done(function(notes, syncTargets) {
                     lthis._notesByID = {};
                     lthis._notesByTitle = {};
                     lthis._notesByTag = {};
                     lthis._notesBySyncTarget = {};
+                    lthis._syncTargetsByID = {};
                     notes.forEach(function(note) { lthis._insertNote(note); });
+                    syncTargets.forEach(function(syncTarget) {
+                        lthis._syncTargetsByID[syncTarget.getID()] = syncTarget;
+                        lthis._updateSyncTargetButton(syncTarget);
+                    });
 
                     lthis._noteList = new NoteList();
                     lthis._syncTargetList = new SyncTargetList();
@@ -116,8 +124,6 @@ NoteBrowser.prototype._init = function() {
     $(window).on('hashchange', checkHash);
     checkHash();
 
-    this._updateSyncTargetButtons();
-
     $('#newNoteButton').click(function() {
         Note.create('# New Note\n')
             .fail(function(err) { lthis.showError(err); })
@@ -160,14 +166,6 @@ NoteBrowser.prototype.showInfo = function(message, box) {
     return box.append($('<p/>')
             .text(String(message)));
 }
-NoteBrowser.prototype._updateSyncTargetButtons = function() {
-    var lthis = this;
-    dbInterface.getAllSyncTargets().done(function(targets) {
-        targets.forEach(function(t) {
-            lthis._updateSyncTargetButton(t);
-        });
-    });
-}
 NoteBrowser.prototype._updateSyncTargetButton = function(target) {
     target = target.copy();
     $('#synctargetbutton_' + target.getID(), '#syncTargetButtons').remove();
@@ -209,6 +207,9 @@ NoteBrowser.prototype.getNotesBySyncTarget = function(syncTargetID) {
 }
 NoteBrowser.prototype.getAllNotes = function() {
     return this._notesByID; /* XXX copy? */
+}
+NoteBrowser.prototype.getAllSyncTargets = function() {
+    return this._syncTargetsByID; /* XXX copy? */
 }
 NoteBrowser.prototype._showNote = function(id) {
     if (!(id in this._notesByID)) {
@@ -533,38 +534,31 @@ NoteViewer.prototype._toViewMode = function() {
 NoteViewer.prototype._updateSyncTable = function() {
     var lthis = this;
     this._syncTableArea.empty();
-    /* XXX store them in NoteBrowser */
-    dbInterface.getAllSyncTargets()
-        .done(function(targets) {
-            var table = $('<table class="table table-striped table-bordered"><thead>' +
-                                '<tr><th>Sync Target</th><th>&nbsp;</th></tr>' +
-                                '</thead></table>');
-            var tbody = $('<tbody/>').appendTo(table);
-            targets.forEach(function(target) {
-                /* XXX update this */
-                var seq = lthis._note.getLocalSeq(target.getID());
-                var tr = $('<tr/>')
-                    .append($('<td/>').text(target.getName()));
-                if (seq === undefined) {
-                    $('<button class="btn btn-small inline">set to sync</button>')
-                        .click(function() {
-                            lthis._note.setLocalSeq(target.getID(), 0)
-                                .done(function() {
-                                    lthis._updateSyncTable();
-                                });
-                        })
-                        .appendTo($('<td/>').appendTo(tr));
-                } else {
-                    tr.append($('<td/>').text(lthis._note.getLocalSeq(target.getID())))
-                }
-                tr.appendTo(tbody);
-            });
-            lthis._syncTableArea.empty();
-            table.appendTo(lthis._syncTableArea);
-        })
-        .fail(function(err) {
-            noteBrowser.showError(err);
-        });
+    var table = $('<table class="table table-striped table-bordered"><thead>' +
+                        '<tr><th>Sync Target</th><th>&nbsp;</th></tr>' +
+                        '</thead></table>');
+    var tbody = $('<tbody/>').appendTo(table);
+    $.each(noteBrowser.getAllSyncTargets(), function(id, target) {
+        /* XXX update this */
+        var seq = lthis._note.getLocalSeq(target.getID());
+        var tr = $('<tr/>')
+            .append($('<td/>').text(target.getName()));
+        if (seq === undefined) {
+            $('<button class="btn btn-small inline">set to sync</button>')
+                .click(function() {
+                    lthis._note.setLocalSeq(target.getID(), 0)
+                        .done(function() {
+                            lthis._updateSyncTable();
+                        });
+                })
+                .appendTo($('<td/>').appendTo(tr));
+        } else {
+            tr.append($('<td/>').text(lthis._note.getLocalSeq(target.getID())))
+        }
+        tr.appendTo(tbody);
+    });
+    this._syncTableArea.empty();
+    table.appendTo(lthis._syncTableArea);
 }
 NoteViewer.prototype._saveChanges = function() {
     if (this._revision !== undefined) {
@@ -1947,15 +1941,9 @@ SyncTargetList.prototype.update = function() {
     var lthis = this;
 
     $('#syncTableBody').empty();
-    dbInterface.getAllSyncTargets()
-        .done(function(targets) {
-            targets.forEach(function(target) {
-                lthis._updateListEntry(target);
-            });
-        })
-        .fail(function(err) {
-            noteBrowser.showError(err);
-        });
+    $.each(noteBrowser.getAllSyncTargets(), function(id, target) {
+        lthis._updateListEntry(target);
+    });
 }
 
 function NoteList() {
