@@ -8,7 +8,14 @@
     <script src="./lib/showdown.js"></script>
     <script src="./lib/mathjax/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
     <script type="text/x-mathjax-config">
-      MathJax.Hub.Config({ messageStyle: "none", tex2jax: {inlineMath: [['$','$'], ['\\(','\\)']]} });
+      MathJax.Hub.Config({
+          positionToHash: false,
+          showMathMenu: false,
+          messageStyle: "none",
+          "HTML-CSS": {imageFont: null, linebreaks: {automatic: true}},
+          "SVG": {linebreaks: {automatic: true}},
+          tex2jax: {inlineMath: [['$','$'], ['\\(','\\)']]}
+      });
     </script>
     <link href="./lib/bootstrap/css/bootstrap.css" rel="stylesheet">
     <link href="./lib/bootstrap/css/bootstrap-responsive.css" rel="stylesheet">
