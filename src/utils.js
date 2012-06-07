@@ -364,7 +364,7 @@ var LocalFileInterface = (function() {
             return $.when(true);
         } catch (e) {
             if ('name' in e && e.name === "NS_ERROR_FILE_ALREADY_EXISTS") {
-                var age = (new Date()) - file.lastModifiedTime();
+                var age = (new Date()) - file.lastModifiedTime;
                 return $.when(false, age);
             } else {
                 return $.Deferred().reject(e.message).promise();

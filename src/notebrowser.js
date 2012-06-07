@@ -1388,8 +1388,12 @@ LocalFileSystemDB.prototype.getRevisionMetadata = function(noteID) {
     return this._readJSONFilesInDir('data/notes/' + noteID, true).pipe(function(objList) {
         var objs = {};
         objList.forEach(function(o) {
-            delete o.text;
-            objs[o._id] = o;
+            try {
+                delete o.text;
+                objs[o._id] = o;
+            } catch (e) {
+                /* XXX */
+            }
         });
         return objs;
     });
@@ -2741,6 +2745,7 @@ var SyncTarget = DBObject.extend({
 
         var remoteDB = getSyncInterface(this.getURL());
 
+        /* XXX this should be moved to the DB interface */
         if (!$.support.cors) {
             try {
                 if (netscape.security.PrivilegeManager.enablePrivilege) {
@@ -2829,10 +2834,13 @@ var SyncTarget = DBObject.extend({
         var lthis = this;
         noteBrowser.showInfo("Pushing objects to remote server.", messageBox);
         
-        var notes = noteBrowser.getNotesBySyncTarget(this.getID());
+        /* XXX do a complete sync until we find a good way to specify
+         * whith note to sync */
+        //var notes = noteBrowser.getNotesBySyncTarget(this.getID());
+        var notes = noteBrowser.getAllNotes();
         var noteSeqs = {};
         $.each(notes, function(id, note) {
-            noteSeqs[id] = note.getLocalSeq(lthis.getID());
+            noteSeqs[id] = note.getLocalSeq(lthis.getID()) || 0;
         });
         return dbInterface.changedRevisions(noteSeqs).pipe(function(res) {
             var revisionIDsToPush = [];
