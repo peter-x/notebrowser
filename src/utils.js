@@ -258,6 +258,7 @@ var LocalFileInterface = (function() {
     function readNetscape(path) {
         console.log("Request to read  " + path);
         try {
+            path = urlToLocalPath(path);
             netscape.security.PrivilegeManager.enablePrivilege("UniversalXPConnect");
             var file = Components.classes["@mozilla.org/file/local;1"]
                             .createInstance(Components.interfaces.nsILocalFile);

@@ -158,13 +158,17 @@ NoteBrowser.prototype.showError = function(message) {
         .alert()
         .appendTo('#messageArea');
 }
-NoteBrowser.prototype.showInfo = function(message, box) {
+NoteBrowser.prototype.showInfo = function(message, box, rich) {
     if (box === undefined)
         box = $('<div class="alert alert-info"><a class="close" data-dismiss="alert" href="#">&times;</a></div>')
             .alert()
             .appendTo('#messageArea');
-    return box.append($('<p/>')
-            .text(String(message)));
+    if (rich) {
+        return box.append($('<p/>').append(message));
+    } else {
+        return box.append($('<p/>')
+                .text(String(message)));
+    }
 }
 NoteBrowser.prototype._updateSyncTargetButton = function(target) {
     target = target.copy();
@@ -1441,8 +1445,13 @@ LocalFileSystemDB.prototype.changedRevisions = function(noteID, after, onlyRemot
                 });
             }
             return getChanges(i + 1);
-        }, function() {
-            return $.when({lastSeq: i - 1, revisions: revs});
+        }, function(err) {
+            /* XXX more robust error type detection */
+            if (err.substr(0, 10) === "JSON error") {
+                return getChanges(i + 1);
+            } else {
+                return $.when({lastSeq: i - 1, revisions: revs});
+            }
         });
     }
     
@@ -2291,9 +2300,18 @@ var Note = DBObject.extend({
     /* TODO merge options (auto/manual/...) */
     mergeWithRevision: function(otherRevObj) {
         var lthis = this;
+        if (otherRevObj.getID() === this.getHeadRevisionID()) {
+            return $.when(["unchanged", lthis]);
+        }
         return this.getHeadRevision().pipe(function(headRev) {
             return headRev.createMergedRevision(otherRevObj).pipe(function(newRevObj) {
-                return lthis._updateToRevision(newRevObj);
+                return lthis._updateToRevision(newRevObj).pipe(function() {
+                    if (newRevObj.getID() === otherRevObj.getID()) {
+                        return ["fast-forward", lthis];
+                    } else {
+                        return ["merge", lthis];
+                    }
+                });
             });
         });
     },
@@ -2347,8 +2365,9 @@ Note.mergeHeadsAndUpdate = function(noteID, headRevisions) {
     return (new Note(noteID)).getConstructorPromise().pipe(function(note) {
         return note.mergeWithRevision(headRevisions[0]);
     }, function() {
-        console.log("Creating new Note: " + noteID);
-        return Note.createWithExistingRevision(noteID, headRevisions[0]);
+        return Note.createWithExistingRevision(noteID, headRevisions[0]).pipe(function(note) {
+            return ["new", note];
+        });
     });
 }
 
@@ -2714,9 +2733,11 @@ var SyncTarget = DBObject.extend({
         this._super(id);
         if (id === undefined) {
             this._dbObj.type = 'syncTarget';
+            this._dbObj.selective = false;
             this._dbObj.name = null;
             this._dbObj.url = null;
             this._dbObj.remoteSeq = 0;
+            this._dbObj.localSeq = 0; /* only for selective */
         }
     },
     copy: function() {
@@ -2738,6 +2759,12 @@ var SyncTarget = DBObject.extend({
     },
     getRemoteSeq: function() {
         return this._dbObj.remoteSeq
+    },
+    getLocalSeq: function() {
+        return this._dbObj.localSeq || 0;
+    },
+    isSelective: function() {
+        return !(!this._dbObj.selective);
     },
     doSync: function() {
         var lthis = this;
@@ -2815,12 +2842,33 @@ var SyncTarget = DBObject.extend({
                             /* TODO really do this in parallel? */
                             var processes = $.map(NoteRevision.determineHeadRevisions(checkedObjects.objectList()),
                                                     function(revisions, noteID) {
-                                /* TODO we do not want arbitrary people to cause
-                                 * our notes to be merged we do not have marked
-                                 * to be synchronized */
                                 /* TODO merge these in one change file */
-                                return Note.mergeHeadsAndUpdate(noteID, revisions);
+                                if (lthis.isSelective()) {
+                                    /* TODO we do not want arbitrary people to cause
+                                     * our notes to be merged we do not have marked
+                                     * to be synchronized
+                                     */
+                                    /* TODO */
+                                    return;
+                                }
+                                return Note.mergeHeadsAndUpdate(noteID, revisions).pipe(function(res) {
+                                    var type = res[0];
+                                    var note = res[1];
+                                    if (type === "unchanged")
+                                        return;
+                                    var link = $('<a/>', {href: '#' + noteID}).text(note.getTitle());
+                                    var text = '';
+                                    if (type === "new") {
+                                        text = 'New Note: ';
+                                    } else if (type === "fast-forward") {
+                                        text = 'Note changed: ';
+                                    } else {
+                                        text = 'Note merged: ';
+                                    }
+                                    noteBrowser.showInfo($("<span/>").text(text).append(link), messageBox, true);
+                                });
                             });
+                            /* XXX suppress change log */
                             processes.push(lthis._setRemoteSeq(lastSeq));
                             return DeferredSynchronizer(processes).pipe(function() {
                                 /* XXX errors? */
@@ -2836,13 +2884,21 @@ var SyncTarget = DBObject.extend({
         
         /* XXX do a complete sync until we find a good way to specify
          * whith note to sync */
-        //var notes = noteBrowser.getNotesBySyncTarget(this.getID());
-        var notes = noteBrowser.getAllNotes();
-        var noteSeqs = {};
-        $.each(notes, function(id, note) {
-            noteSeqs[id] = note.getLocalSeq(lthis.getID()) || 0;
-        });
-        return dbInterface.changedRevisions(noteSeqs).pipe(function(res) {
+        var notes;
+        var proc;
+        if (this.isSelective()) {
+            notes = noteBrowser.getNotesBySyncTarget(this.getID());
+            var noteSeqs = {};
+            $.each(notes, function(id, note) {
+                noteSeqs[id] = note.getLocalSeq(lthis.getID()) || 0;
+            });
+            proc = dbInterface.changedRevisions(noteSeqs);
+        } else {
+            notes = noteBrowser.getAllNotes();
+            proc = dbInterface.changedRevisions(null, this.getLocalSeq());
+        }
+
+        return proc.pipe(function(res) {
             var revisionIDsToPush = [];
             res.revisions.forEach(function(rev) {
                 if (!revsToIgnore.hasID(rev))
@@ -2854,29 +2910,46 @@ var SyncTarget = DBObject.extend({
             /* TODO we could have errors in some processes */
             return dbInterface.getDocs(revisionIDsToPush).pipe(function(objs) {
                 return remoteDB.saveRevisions(objs).pipe(function() {
-                    return DeferredSynchronizer($.map(notes, function(note) {
-                        return note.setLocalSeq(lthis.getID(), lastSeq, {'suppressChangeLog': true});
-                    })).pipe(function() {
+                    var proc;
+                    if (lthis.isSelective()) {
+                        proc = DeferredSynchronizer($.map(notes, function(note) {
+                            return note.setLocalSeq(lthis.getID(), lastSeq, {'suppressChangeLog': true});
+                        }));
+                    } else {
+                        proc = lthis._setLocalSeq(lastSeq, {'suppressChangeLog': true});
+                    }
+                    return proc.pipe(function() {
                         return dbInterface.logSuppressedChanges();
                     });
                 });
             });
         });
     },
-    _setRemoteSeq: function(remoteSeq) {
+    /* XXX move these to the general db object as "raiseTo" */
+    _setRemoteSeq: function(remoteSeq, options) {
         return this._save(function(dbObj) {
             if (dbObj.remoteSeq === remoteSeq)
                 return null;
             var s = dbObj.remoteSeq || 0;
             dbObj.remoteSeq = Math.max(s, remoteSeq);
             return dbObj;
-        });
+        }, options);
     },
-    save: function(name, url) {
+    _setLocalSeq: function(localSeq, options) {
+        return this._save(function(dbObj) {
+            if (dbObj.localSeq === localSeq)
+                return null;
+            var s = dbObj.localSeq || 0;
+            dbObj.localSeq = Math.max(s, localSeq);
+            return dbObj;
+        }, options);
+    },
+    save: function(name, url, selective) {
         return this._save(function(dbObj) {
             if ('_id' in dbObj || '_rev' in dbObj)
                 throw new Error("Only new sync targets can be saved.");
             dbObj.type = "syncTarget";
+            dbObj.selective = !(!selective);
             dbObj.name = name;
             dbObj.url = url;
             dbObj.remoteSeq = 0;
@@ -2884,8 +2957,8 @@ var SyncTarget = DBObject.extend({
         });
     }
 });
-SyncTarget.create = function(name, url) {
-    return (new SyncTarget()).save(name, url);
+SyncTarget.create = function(name, url, selective) {
+    return (new SyncTarget()).save(name, url, selective);
 }
 
 noteBrowser = new NoteBrowser();
