@@ -390,7 +390,7 @@ NoteViewer.prototype._doRenderSubtags = function() {
 
         parents[tag] = 1;
         var ul = $('<ul></ul>');
-        notes.sort(function(a, b) { return a.getTitle() < b.getTitle(); })
+        notes.sort(function(a, b) { return StringCmp(a.getTitle(), b.getTitle()); })
             .forEach(function(note) {
                 var id = note.getID();
                 var title = note.getTitle();

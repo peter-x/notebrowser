@@ -107,6 +107,16 @@ function addEvents(className, possibleEvents) {
     }
 }
 
+var StringCmp = function(a, b) {
+    if (a < b) {
+        return -1
+    } else if (a > b) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
 var LocalFileInterface = (function() {
     function urlToLocalPath(url) {
         if (url.substr(0, 7) == "file://") {
