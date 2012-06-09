@@ -10,8 +10,6 @@ function NoteBrowser() {
 
     this._noteViewer = new NoteViewer();
 
-    /* XXX objects in here should not be change.
-     * enforce that by setting them to "constant"? */
     this._notesByID = null;
     this._notesByTitle = null;
     this._notesByTag = null;
@@ -25,11 +23,14 @@ function NoteBrowser() {
         lthis._changeListener = dbInterface.on('change', function(doc) {
             if (doc.type && doc.type === 'syncTarget') {
                 var t = new SyncTarget(doc);
+                t.setImmutable();
                 lthis._syncTargetsByID[doc._id] = t;
                 lthis._updateSyncTargetButton(t);
             } else if (doc.type && doc.type === 'note') {
                 lthis._removeNote(doc._id);
-                lthis._insertNote(new Note(doc));
+                var note = new Note(doc);
+                note.setImmutable();
+                lthis._insertNote(note);
             }
         });
         dbInterface.on('ready', function() {
@@ -40,8 +41,12 @@ function NoteBrowser() {
                     lthis._notesByTag = {};
                     lthis._notesBySyncTarget = {};
                     lthis._syncTargetsByID = {};
-                    notes.forEach(function(note) { lthis._insertNote(note); });
+                    notes.forEach(function(note) {
+                        note.setImmutable();
+                        lthis._insertNote(note);
+                    });
                     syncTargets.forEach(function(syncTarget) {
+                        syncTarget.setImmutable();
                         lthis._syncTargetsByID[syncTarget.getID()] = syncTarget;
                         lthis._updateSyncTargetButton(syncTarget);
                     });

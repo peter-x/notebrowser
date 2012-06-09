@@ -531,6 +531,11 @@ var DBObject = Class.extend({
             throw new Error("Invalid database object.");
         }
     },
+    setImmutable: function() {
+        this._save = this.setDBObj = function() {
+            return $.Deferred().reject("Tried to modify immutable object.");
+        }
+    },
     /* modifier is function that takes a copy of this._dbObj and returns
      * modified db object (or promise),
      * changes only take effect after saving,
