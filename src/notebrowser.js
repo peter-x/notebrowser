@@ -631,18 +631,20 @@ function RevisionGraph(noteViewer, note, revision, container) {
     this._width = 0;
     this._height = 0;
     this._container = container;
+    this._scrollArea = null;
     this._canvas = null;
 
     this._revisions = {};
     this.redraw();
 
     this._installChangeListener();
-    this._update();
+    this._reload();
 }
 RevisionGraph.prototype.destroy = function() {
     /* TODO make sure this gets called */
     dbInterface.off('change', this._changeListener);
     this._container.empty();
+    this._scrollArea = null;
 }
 RevisionGraph.prototype._installChangeListener = function() {
     var lthis = this;
@@ -650,21 +652,18 @@ RevisionGraph.prototype._installChangeListener = function() {
         lthis._changeListener = dbInterface.on('change', function(doc) {
             if (doc.type && doc.type == 'noteRevision' && doc.note && doc.note === lthis._note.getID()) {
                 lthis._revisions[doc._id] = doc;
-                lthis._updateHierarchy();
-                lthis.redraw();
+                lthis._updateHierarchyAndRedraw(false);
             }
         });
     }
 }
-RevisionGraph.prototype._update = function() {
+RevisionGraph.prototype._reload = function() {
     var lthis = this;
     dbInterface.getRevisionMetadata(this._note.getID())
         .fail(function(err) { noteBrowser.showError("Error loading revisions: " + err); })
         .done(function(revs, updateSeq) {
             lthis._revisions = revs;
-            lthis._updateHierarchy();
-            /* XXX is it safe to draw now? (the width is not yet fixed) */
-            lthis.redraw();
+            lthis._updateHierarchyAndRedraw(true);
         });
 }
 RevisionGraph.prototype._getRoots = function() {
@@ -687,7 +686,7 @@ RevisionGraph.prototype._getChildrenMap = function() {
     }
     return children;
 }
-RevisionGraph.prototype._updateHierarchy = function() {
+RevisionGraph.prototype._updateHierarchyAndRedraw = function(reload) {
     var root = this._getRoots();
     var children = this._getChildrenMap();
 
@@ -725,9 +724,17 @@ RevisionGraph.prototype._updateHierarchy = function() {
 
         x ++;
     }
+
+    var oldWidth = this._width;
     
-    this._width = (x - 1) * this._horDistance + 2 * this._horBorder;
-    this._height = (maxColumn - 1) * this._horDistance + 2 * this._verBorder;
+    this._width = Math.max((x - 1) * this._horDistance + 2 * this._horBorder, 10);
+    this._height = Math.max((maxColumn - 1) * this._horDistance + 2 * this._verBorder, 10);
+
+    var widthChange = undefined;
+    if (oldWidth !== null && this._scrollArea !== null)
+        widthChange = this._width - oldWidth;
+
+    this.redraw(widthChange, reload);
 }
 RevisionGraph.prototype._allParentsArePositioned = function(revId) {
     var r = this._revisions[revId];
@@ -745,12 +752,13 @@ RevisionGraph.prototype._getPosition = function(id) {
     var y = this._height / 2 + this._revisionPositions[id][1] * this._verDistance;
     return [x, y];
 }
-RevisionGraph.prototype._updateUIElements = function() {
+RevisionGraph.prototype._updateUIElements = function(widthChange, reload) {
+    var oldScrollPos = this._scrollArea !== null ? this._scrollArea.scrollLeft() : -1;
     this._container.empty();
-    var div = $('<div style="position: relative; width: 100%; height: 160px; overflow: auto;"/>')
+    this._scrollArea = $('<div style="position: relative; width: 100%; height: 160px; overflow: auto;"/>')
                 .appendTo(this._container);
     this._canvas = $('<canvas style="width: 500px; height: 100px;"></canvas>')
-        .appendTo(div);
+        .appendTo(this._scrollArea);
     this._canvas.width(this._width);
     this._canvas.height(this._height);
     this._canvas[0].width = this._width; /* clear and set size */
@@ -800,12 +808,22 @@ RevisionGraph.prototype._updateUIElements = function() {
         trigger.click(function() {
             lthis._noteViewer.showRevision(r._id);
         });
-        trigger.appendTo(div);
+        trigger.appendTo(lthis._scrollArea);
     });
     showInfo(this._currentRevision);
+    if (oldScrollPos === -1 || reload) {
+        this._scrollArea.scrollLeft(this._width);
+    } else {
+        if (widthChange !== undefined && oldScrollPos + this._scrollArea.width() >= this._width - widthChange) {
+            this._scrollArea.scrollLeft(oldScrollPos + widthChange);
+        } else {
+            this._scrollArea.scrollLeft(oldScrollPos);
+        }
+    }
 }
-RevisionGraph.prototype.redraw = function() {
-    this._updateUIElements();
+RevisionGraph.prototype.redraw = function(widthChange, reload) {
+    if (reload === undefined) reload = true;
+    this._updateUIElements(widthChange, reload);
 
     var ctx = this._canvas[0].getContext('2d');
 
@@ -855,9 +873,9 @@ RevisionGraph.prototype.setCurrentRevision = function(revision, note) {
     this._currentRevision = revision;
     if (note) {
         this._note = note;
-        this._update();
+        this._reload();
     } else {
-        this.redraw();
+        this.redraw(undefined, false);
     }
 }
 
