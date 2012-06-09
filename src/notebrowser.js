@@ -239,7 +239,6 @@ function NoteViewer() {
     this._revisionGraphArea = null;
     this._syncTableArea = null;
     this._editArea = null;
-    this._viewArea = null;
     this._viewAreaTags = null;
     this._viewAreaSubtags = null;
     this._viewAreaText = null;
@@ -309,7 +308,6 @@ NoteViewer.prototype._findUIElements = function() {
         .hide();
 
     this._editArea = $('#editArea');
-    this._viewArea = $('#viewArea');
     this._viewAreaTags = $('#viewAreaTags');
     this._viewAreaSubtags = $('#viewAreaSubtags');
     this._viewAreaText = $('#viewAreaText');
@@ -379,31 +377,48 @@ NoteViewer.prototype._doRenderTags = function() {
 }
 NoteViewer.prototype._doRenderSubtags = function() {
     /* XXX listen on changes to these notes? */
-    var tagArea = $('#viewAreaSubtags').empty();
+    var tagAreas = $('div', '#viewAreaSubtags').empty();
 
-    function renderRec(tag, target, parents) {
+    function renderRec(tag, targets, parents) {
         var notes = $.map(noteBrowser.getNotesByTag(tag), function(note) { return note; });
-        if (notes.length === 0) return;
+        if (notes.length === 0) return 0;
 
         parents[tag] = 1;
-        var ul = $('<ul></ul>');
+        var children = [];
+        var childrenSizes = [];
         notes.sort(function(a, b) { return StringCmp(a.getTitle(), b.getTitle()); })
             .forEach(function(note) {
                 var id = note.getID();
                 var title = note.getTitle();
                 var li = $('<li></li>')
-                    .append($('<a></a>', {href: '#' + id}) .text(title));
+                    .append($('<a></a>', {href: '#' + id}).text(title));
+                var childSize = 1;
                 if (id in parents) {
                     $('<ul><li>(loop)</li></ul>').appendTo(li);
+                    childSize += 1;
                 } else {
-                    renderRec(id, li, parents);
+                    childSize += renderRec(id, li, parents);
                 }
-                li.appendTo(ul);
+                children.push(li);
+                childrenSizes.push(childSize);
             });
-        ul.appendTo(target);
         delete parents[tag];
+
+        var numItems = childrenSizes.length === 0 ? 0 : childrenSizes.reduce(function(a, b) { return a + b; });
+        var itemsPositioned = 0;
+        var child = 0;
+        targets.each(function(i, target) {
+            var ul = $('<ul></ul>').appendTo(target);
+            while (itemsPositioned < (i + 1) / targets.length * numItems) {
+                children[child].appendTo(ul);
+                itemsPositioned += childrenSizes[child];
+                child += 1;
+            }
+        });
+
+        return numItems;
     }
-    renderRec(this._note.getID(), tagArea, {});
+    renderRec(this._note.getID(), tagAreas, {});
 }
 NoteViewer.prototype._doRender = function(math) {
     this._renderTimer = null;
@@ -437,7 +452,7 @@ NoteViewer.prototype.closeNote = function() {
         this._revisionGraph = null;
     }
     this._viewAreaTags.empty();
-    this._viewAreaSubtags.empty();
+    $('div', this._viewAreaSubtags).empty();
     this._viewAreaTags.empty();
 }
 NoteViewer.prototype.showNote = function(note, revision) {
@@ -483,13 +498,12 @@ NoteViewer.prototype._toEditMode = function() {
 
             lthis._doRenderTags();
             lthis._doRenderSubtags();
-            lthis._doRender(true);
 
             lthis._editMode = true;
             lthis._buttonEdit.hide();
             lthis._buttonSave.show();
             lthis._buttonCancel.show();
-            lthis._viewArea
+            lthis._viewAreaText
                 .removeClass('span9')
                 .addClass('span4');
             lthis._editArea.show();
@@ -497,6 +511,8 @@ NoteViewer.prototype._toEditMode = function() {
                 .val(text)
                 .focus();
             $('#editTags').val(tags.join(', '));
+
+            lthis._doRender(true);
         })
         .fail(function(err) {
             noteBrowser.showError(err);
@@ -520,12 +536,13 @@ NoteViewer.prototype._toViewMode = function() {
 
             lthis._doRenderTags();
             lthis._doRenderSubtags();
-            lthis._doRender(true);
 
-            lthis._viewArea
+            lthis._viewAreaText
                 .removeClass('span4')
                 .addClass('span9');
             lthis._editArea.hide();
+
+            lthis._doRender(true);
         })
         .fail(function(err) {
             noteBrowser.showError(err);
