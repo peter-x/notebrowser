@@ -123,7 +123,10 @@ NoteBrowser.prototype._init = function() {
             noteBrowser.showError("Note " + hash + " not found.");
             return false;
         }
-        lthis._showNote(note.getID());
+        lthis.currentNoteID.set(note.getID());
+        lthis._noteViewer.showNote(note);
+        $('#noteNavigation').addClass('hidden-phone');
+        $('#noteArea').show();
     }
 
     $(window).on('hashchange', checkHash);
@@ -135,6 +138,7 @@ NoteBrowser.prototype._init = function() {
             .done(function(note) {
                 lthis._noteViewer.showEditNote(note);
                 lthis.currentNoteID.set(note.getID());
+                document.location.hash = '#' + note.getID();
                 $('#noteNavigation').addClass('hidden-phone');
                 $('#noteArea').show();
             });
@@ -219,18 +223,6 @@ NoteBrowser.prototype.getAllNotes = function() {
 }
 NoteBrowser.prototype.getAllSyncTargets = function() {
     return this._syncTargetsByID; /* XXX copy? */
-}
-NoteBrowser.prototype._showNote = function(id) {
-    if (!(id in this._notesByID)) {
-        noteBrowser.showError("Note not found.");
-        return;
-    }
-    this.currentNoteID.set(id);
-    /* XXX give noteViewer a chance to ask the user if the current note should
-     * be closed */
-    this._noteViewer.showNote(this.getNoteByID(id));
-    $('#noteNavigation').addClass('hidden-phone');
-    $('#noteArea').show();
 }
 
 function NoteViewer() {
