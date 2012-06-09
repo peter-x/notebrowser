@@ -687,6 +687,8 @@ RevisionGraph.prototype._updateHierarchyAndRedraw = function(reload) {
     var root = this._getRoots();
     var children = this._getChildrenMap();
 
+    var numRevisions = 0;
+    $.each(this._revisions, function() { numRevisions += 1; });
     this._revisionPositions = {};
     var queue = {};
     this._getRoots().forEach(function(root) { queue[root] = 1; });
@@ -694,8 +696,8 @@ RevisionGraph.prototype._updateHierarchyAndRedraw = function(reload) {
     var cont = true;
     var maxColumn = 0;
 
-    /* XXX detect loops */
-    while (cont && x < 100) {
+    /* we can have loops */
+    while (cont && x < numRevisions + 2) {
         cont = false;
         var nextQueue = {};
         var thisColumn = [];
