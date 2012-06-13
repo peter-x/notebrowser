@@ -1997,7 +1997,7 @@ function NoteList() {
     /* TODO search */
 
     this._changeListener = null;
-    this._sortStyle = 'title';
+    this._sortStyle = 'tag'; /* XXX we should extract that from the html */
 
     var lthis = this;
 
