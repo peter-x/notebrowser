@@ -313,11 +313,12 @@ NoteViewer.prototype._findUIElements = function() {
     this._viewAreaText = $('#viewAreaText');
 
     $('#editTags').keyup(function() { lthis._tagsTextChanged(); });
-    $('textarea', this._editArea).keyup(function() { lthis._textChanged(); });
-    window.setInterval(function() {
+    function checkForTextChange() {
         if (lthis._editMode && $('textarea', lthis._editArea).val() !== lthis._lastRawText)
             lthis._textChanged();
-    }, 1000);
+    }
+    $('textarea', this._editArea).keyup(checkForTextChange);
+    window.setInterval(checkForTextChange, 1000);
 }
 NoteViewer.prototype._textChanged = function() {
     if (!this._editMode)
