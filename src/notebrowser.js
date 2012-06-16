@@ -74,8 +74,13 @@ NoteBrowser.prototype._insertNote = function(note) {
     var title = note.getTitle();
 
     this._notesByID[id] = note;
-    if (!(title in this._notesByTitle))
+    if (!(title in this._notesByTitle)) {
         this._notesByTitle[title] = {};
+        try {
+            $('#searchInput').data('typeahead').source.push(title);
+        } catch (e) {
+        }
+    }
     this._notesByTitle[title][id] = note;
 
     note.getTags().forEach(function(tag) {
@@ -104,8 +109,18 @@ NoteBrowser.prototype._removeNote = function(id) {
         if (lthis._notesBySyncTarget[targetID] !== undefined)
             delete lthis._notesBySyncTarget[targetID][id];
     }
-    delete this._notesByTitle[note.getTitle()][id];
+    var title = note.getTitle();
+    delete this._notesByTitle[title][id];
     delete this._notesByID[id];
+
+    if (this.getFirstNoteByTitle(title) === undefined) {
+        delete this._notesByTitle[title];
+        try {
+            $('#searchInput').data('typeahead').source.splice(
+                    $('#searchInput').data('typeahead').source.indexOf(title), 1);
+        } catch (e) {
+        }
+    }
 }
 NoteBrowser.prototype._init = function() {
     var lthis = this;
@@ -142,6 +157,14 @@ NoteBrowser.prototype._init = function() {
                 $('#noteNavigation').addClass('hidden-phone');
                 $('#noteArea').show();
             });
+    });
+    /* TODO problem if two notes have the same title */
+    $('#searchInput').typeahead({
+        source: $.map(lthis._notesByTitle, function(note, title) { return title; }),
+        updater: function(title) {
+            document.location.hash = '#' + title;
+            return title;
+        }
     });
     $('#newSyncButton').click(function() {
         /* TODO improve this */
