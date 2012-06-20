@@ -276,7 +276,7 @@ function NoteViewer() {
 
     this._noteText = '';
     this._noteTags = [];
-    this._landRenderDuration = 500;
+    this._lastRenderDuration = 500;
     this._lastRawText = '';
     this._renderTimer = null;
 
@@ -354,7 +354,7 @@ NoteViewer.prototype._textChanged = function() {
 
     var lthis = this;
     this._renderTimer = window.setTimeout(function() { lthis._doRender(true); },
-                      Math.min(2.0 * this._lastRenderDuration, 2000));
+                      Math.min(4.0 * this._lastRenderDuration, 2000));
 }
 NoteViewer.prototype._tagsTextChanged = function() {
     if (!this._editMode)
