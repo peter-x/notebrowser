@@ -70,15 +70,25 @@ public class FSAccessor extends java.applet.Applet {
             }
         });
     }
-    public String[] list(final String pathname, final boolean create) {
-        return (String[])AccessController.doPrivileged(new PrivilegedAction() {
+    /* it is very inefficient to return Java arrays (element access from
+     * javascript seems to call Java functions again), so we return an encoded
+     * version of the array  */
+    public String list(final String pathname, final boolean create) {
+        return (String)AccessController.doPrivileged(new PrivilegedAction() {
             public Object run() {               
                 try {
                     File f = new File(pathname);
                     if (!f.exists() && create) {
                         f.mkdirs();
                     }
-                    return f.list();
+                    String[] files = f.list();
+                    String fileList = "";
+                    for (int i = 0; i < files.length; i ++) {
+                        fileList += files[i].replace("\\", "\\b").replace(",", "\\c");
+                        if (i < files.length - 1)
+                            fileList += ",";
+                    }
+                    return fileList;
                 } catch (Exception x) {
                     x.printStackTrace();
                     return null;

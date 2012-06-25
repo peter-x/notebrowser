@@ -220,11 +220,9 @@ var LocalFileInterface = (function() {
                 if (ret === null) {
                     return $.Deferred().reject("Error listing files.").promise();
                 } else {
-                    var list = [];
-                    for (var i = 0; ret[i] !== undefined; i ++) {
-                        list[i] = ret[i];
-                    }
-                    return list;
+                    return ('' + ret).split(',').map(function(t) {
+                        return t.replace('\\c', ',').replace('\\b', '\\');
+                    });
                 }
             } catch (e) {
                 return $.Deferred().reject(e.message).promise();
