@@ -117,7 +117,7 @@ var StringCmp = function(a, b) {
     }
 }
 
-var LocalFileInterface = (function() {
+var LocalFileInterface = function(basePath) {
     function urlToLocalPath(url) {
         if (url.substr(0, 7) == "file://") {
             return url.substr(7);
@@ -160,6 +160,93 @@ var LocalFileInterface = (function() {
         }
         checkIfAppletInitialized();
         return d;
+    }
+
+    /* XXX better error messages */
+    function readWebDAV(path) {
+        console.log("Request to read  " + path);
+        return $.ajax({url: path,
+                       /* XXX extract it from path */
+                       username: 'test',
+                       password: 'test',
+                       dataType: 'text'})
+            .pipe(null, function() { return $.Deferred().reject("Read error.").promise(); });
+    }
+    function writeWebDAV(path, data) {
+        console.log("Request to write " + path);
+        return $.ajax({url: path,
+                       /* XXX extract it from path */
+                       username: 'test',
+                       password: 'test',
+                       data: data,
+                       contentType: '',
+                       type: 'PUT',
+                       dataType: 'text'})
+            .pipe(function() {
+                return true;
+            }, function() { return $.Deferred().reject("Write error.").promise(); });
+    }
+    function existsWebDAV(path) {
+        console.log("Request to exist " + path);
+        return $.ajax({url: path,
+                       /* XXX extract it from path */
+                       username: 'test',
+                       password: 'test',
+                       type: 'HEAD'})
+            .pipe(function() {
+                return true;
+            }, function(jqXHR) {
+                if (jqXHR.status == '301' || jqXHR.status == '302') {
+                    return $.when(true).promise();
+                } else {
+                    return $.when(false).promise();
+                }
+            });
+    }
+    function listWebDAV(path, create) {
+        if (path[path.length - 1] !== '/')
+            path += '/';
+
+        var m = path.match(/(https?:\/\/[^\/]*)(\/.*)/);
+        var requestHost = m[1];
+        var requestPath = m[2];
+
+        console.log("Request to list  " + path);
+        var requestData = '<?xml version="1.0" encoding="utf-8" ?>' +
+                           '<propfind xmlns="DAV:"><prop></prop></propfind>';
+        return $.ajax({url: path,
+                       /* XXX extract it from path */
+                       username: 'test',
+                       password: 'test',
+                       type: 'PROPFIND',
+                       contentType: 'application/xml',
+                       headers: {Depth: '1'},
+                       data: requestData})
+            .pipe(function(data) {
+                var entries = [];
+                $('response', data).each(function(i, el) {
+                    var elPath = $('href', el).text();
+                    /* strip hostname */
+                    elPath = elPath.replace(/^https?:\/\/[^\/]*/, '');
+                    if (elPath.substr(0, requestPath.length) === requestPath) {
+                        var el = elPath.substr(requestPath.length, elPath.length);
+                        if (el !== '' && el !== '/') {
+                            entries.push(el);
+                        }
+                    }
+                });
+                return entries;
+            }, function() { return $.Deferred().reject("List error.").promise() });
+    }
+    function acquireLockWebDAV(path) {
+        console.log("Request to lock  " + path);
+        /* TODO */
+        return $.when(true).promise();
+    }
+    function releaseLockWebDAV(path) {
+        console.log("Request to ulock " + path);
+        /* TODO */
+        return $.when(true).promise();
     }
 
     function readJava(path) {
@@ -395,7 +482,11 @@ var LocalFileInterface = (function() {
         }
     }
 
-    if (tryNetscape()) {
+    if (basePath.substr(0, 7) === 'http://') {
+        return {read: readWebDAV, write: writeWebDAV, list: listWebDAV,
+                exists: existsWebDAV,
+                acquireLock: acquireLockWebDAV, releaseLock: releaseLockWebDAV};
+    } else if (tryNetscape()) {
         return {read: readNetscape, write: writeNetscape, list: listNetscape,
                 exists: existsNetscape,
                 acquireLock: acquireLockNetscape, releaseLock: releaseLockNetscape};
@@ -406,7 +497,7 @@ var LocalFileInterface = (function() {
                 acquireLock: acquireLockJava, releaseLock: releaseLockJava};
     }
 
-})();
+}
 
 function LiveValue(initial) {
     this._val = initial;

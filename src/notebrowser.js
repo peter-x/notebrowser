@@ -1232,7 +1232,7 @@ function LocalFileSystemDB(path, remote) {
 
     this._suppressedChangeLogEntries = [[], []];
 
-    this._fs = LocalFileInterface;
+    this._fs = LocalFileInterface(this._path);
 
     if (remote) {
         this._initialized = true;
@@ -1245,7 +1245,12 @@ function LocalFileSystemDB(path, remote) {
     }
 }
 LocalFileSystemDB.prototype._pathFromDocumentLocation = function() {
-    var path = unescape(document.location.pathname);
+    var path;
+    if (document.location.protocol == 'http:' || document.location.protocol == 'https:') {
+        path = document.location.href; /* XXX unescape? */
+    } else {
+        path = unescape(document.location.pathname);
+    }
     var i = path.lastIndexOf('/');
     if (i < 0) {
         return path;
@@ -1958,7 +1963,7 @@ InMemoryDB.prototype._autoSave = function() {
     var data = 'noteBrowserData = ' + this._export() + ';';
 
     var lthis = this;
-    LocalFileInterface.write(path, data)
+    LocalFileInterface(path).write(path, data)
         .done(function() {
             lthis._lastAutoSave = lthis._changeLog.length;
         })
@@ -1971,17 +1976,7 @@ InMemoryDB.prototype._autoSave = function() {
 addEvents(InMemoryDB, ['ready', 'change']);
 
 var DBInterface = (function() {
-    /* XXX better check if couchdb is there */
-
-    var url = document.location.href;
-    if (url.match(/file:\/\//)) {
-        return LocalFileSystemDB;
-    } else if (url.match(/\/_design\//)) {
-        return CouchDB;
-    } else {
-        return InMemoryDB;
-    }
-
+    return LocalFileSystemDB;
 })();
 
 
@@ -2690,7 +2685,7 @@ SyncInterfaceLocalFile.prototype.changedRevisions = function(noteID, since) {
 
     var d = $.Deferred();
     function readChangeFile(s) {
-        LocalFileInterface.read(lthis._url + '/changes-' + s)
+        LocalFileInterface(lthis._url).read(lthis._url + '/changes-' + s)
             .done(function(data) {
                 try {
                     JSON.parse(data).foreach(function(id) {
@@ -2719,7 +2714,7 @@ SyncInterfaceLocalFile.prototype.getDocs = function(ids) {
             d.resolve(docs);
             return;
         }
-        LocalFileInterface.read(lthis._url + '/' + ids[i])
+        LocalFileInterface(lthis._url).read(lthis._url + '/' + ids[i])
             .done(function(data) {
                 try {
                     /* XXX what if the stored id does not match the file name? */
@@ -2750,7 +2745,7 @@ SyncInterfaceLocalFile.prototype.saveRevisions = function(docs) {
         }
         /* XXX what if the id is "changes-2"? */
         var data = JSON.stringify(docs[i]);
-        LocalFileInterface.write(lthis._url + '/' + docs[i]._id, data)
+        LocalFileInterface(lthis._url).write(lthis._url + '/' + docs[i]._id, data)
             .done(function() { writeDoc(i + 1); })
             .fail(function(err) { /* XXX report the error? */ writeDoc(i + 1); });
     }
@@ -2762,7 +2757,7 @@ SyncInterfaceLocalFile.prototype._findNextChangeSeq = function() {
 
     var d = $.Deferred();
     function readChangeFile(s) {
-        LocalFileInterface.read(lthis._url + '/changes-' + s)
+        LocalFileInterface(lthis._url).read(lthis._url + '/changes-' + s)
             .done(function() { readChangeFile(s + 1); })
             .fail(function(err) { d.resolve(s); });
     }
@@ -2772,7 +2767,7 @@ SyncInterfaceLocalFile.prototype._findNextChangeSeq = function() {
 SyncInterfaceLocalFile.prototype._saveChanges = function(changes) {
     var lthis = this;
     return this._findNextChangeSeq().pipe(function(changeSeq) {
-        return LocalFileInterface.write(lthis._url + '/changes-' + changeSeq,
+        return LocalFileInterface(lthis._url).write(lthis._url + '/changes-' + changeSeq,
                                 JSON.stringify(changes));
     });
 }
