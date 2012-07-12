@@ -1,3 +1,7 @@
+define([], function() {
+"use strict";
+
+
 function Diff(s1, s2) {
     this.s1 = s1;
     this.s2 = s2;
@@ -146,12 +150,12 @@ OpStream.prototype.nextOp = function() {
 /* ---------------------------------------------------------------------- */
 
 /* TODO the order of textA and textB is important! */
-function Merge(textParent, textA, textB) {
+function MergeTexts(textParent, textA, textB) {
     this.textParent = textParent;
     this.diffA = new Diff(textParent, textA);
     this.diffB = new Diff(textParent, textB);
 }
-Merge.prototype.getMergedText = function getMergedText() {
+MergeTexts.prototype.getMergedText = function getMergedText() {
     var streamA = new OpStream(this.diffA.calculateDiffOps());
     var streamB = new OpStream(this.diffB.calculateDiffOps());
     var mergedText = '';
@@ -207,3 +211,6 @@ function MergeSortedLists(listParent, listA, listB) {
                                      listToSet(listA),
                                      listToSet(listB)));
 }
+
+return {MergeTexts: MergeTexts, MergeSets: MergeSets, MergeSortedLists: MergeSortedLists};
+});
