@@ -24,6 +24,8 @@ var javaLoader;
 
 function tryJava() {
     $(function() {
+        if (document.applets["FSAccessor"])
+            return;
         $(document.body).append('<applet style="position: absolute; left: -1px;" ' +
                             'name="FSAccessor" code="FSAccessor" ' +
                             'archive="FSAccessor.jar" width="1" height="1"></applet>');
@@ -46,38 +48,77 @@ function tryJava() {
     return d;
 }
 
+/* The only non-HTTP-features we use is
+ * MKCOL (create directory) and PROPFIND (list directory)
+ * Locking is done using only HTTP
+ */
 var WebDAVAccessor = {
     /* XXX better error messages */
+    /* XXX we most probably need authentication.
+     * extract username and password from path */
+    _tryCreateDirectories: function(path) {
+        var lthis = this;
+        var m = path.match(/^(https?:\/\/[^\/]*)\/(.*)/);
+        if (!m) return $.when(true).promise();
+
+        var requestHost = m[1];
+        var requestPath = m[2];
+        var parts = requestPath.split('/');
+
+        function loop(i) {
+            if (i >= parts.length - 1)
+                return $.when(true).promise();
+            var pathPart = requestHost + '/' + parts.slice(0, i + 1).join('/') + '/';
+            return $.ajax({url: pathPart, type: 'MKCOL'}).pipe(
+                    function() { return loop(i + 1); },
+                    function() { return $.when(loop(i + 1)).promise(); });
+        }
+        return loop(0);
+    },
+    _getFileAge: function(path) {
+        var jqXHR = $.ajax({url: path, type: 'HEAD'}).pipe(function() {
+            var date = jqXHR.getResponseHeader('Date');
+            var mod = jqXHR.getResponseHeader('Last-Modifiod');
+            if (!date || !mod)
+                return $.Deferred().reject().promise();
+            date = new Date(date) - 0;
+            mod = new Date(mod) - 0;
+            if (date !== date || mod !== mod)
+                return $.Deferred().reject().promise();
+            return date - mod;
+        });
+        return jqXHR;
+    },
     read: function(path) {
         console.log("Request to read  " + path);
-        return $.ajax({url: path,
-                       /* XXX extract it from path */
-                       username: 'test',
-                       password: 'test',
-                       dataType: 'text'})
+        return $.ajax({url: path, dataType: 'text'})
             .pipe(null, function() { return $.Deferred().reject("Read error.").promise(); });
     },
-    write: function(path, data) {
+    write: function(path, data, _triedCreateDirectories) {
+        var lthis = this;
+
         console.log("Request to write " + path);
         return $.ajax({url: path,
-                       /* XXX extract it from path */
-                       username: 'test',
-                       password: 'test',
                        data: data,
                        contentType: '',
                        type: 'PUT',
                        dataType: 'text'})
             .pipe(function() {
                 return true;
-            }, function() { return $.Deferred().reject("Write error.").promise(); });
+            }, function(jqXHR) {
+                if (!_triedCreateDirectories && (jqXHR.status == '403' || jqXHR.status == '409')) {
+                    /* create ancestor directories */
+                    return lthis._tryCreateDirectories(path).pipe(function() {
+                        return lthis.write(path, data, true);
+                    });
+                } else {
+                    return $.Deferred().reject("Write error.").promise();
+                }
+            });
     },
     exists: function(path) {
         console.log("Request to exist " + path);
-        return $.ajax({url: path,
-                       /* XXX extract it from path */
-                       username: 'test',
-                       password: 'test',
-                       type: 'HEAD'})
+        return $.ajax({url: path, type: 'HEAD'})
             .pipe(function() {
                 return true;
             }, function(jqXHR) {
@@ -88,12 +129,13 @@ var WebDAVAccessor = {
                 }
             });
     },
-    list: function(path, create) {
-        /* TODO honour "create" */
+    list: function(path, create, _triedCreateDirectories) {
+        var lthis = this;
+
         if (path[path.length - 1] !== '/')
             path += '/';
 
-        var m = path.match(/(https?:\/\/[^\/]*)(\/.*)/);
+        var m = path.match(/^(https?:\/\/[^\/]*)(\/.*)/);
         var requestHost = m[1];
         var requestPath = m[2];
 
@@ -101,9 +143,6 @@ var WebDAVAccessor = {
         var requestData = '<?xml version="1.0" encoding="utf-8" ?>' +
                            '<propfind xmlns="DAV:"><prop></prop></propfind>';
         return $.ajax({url: path,
-                       /* XXX extract it from path */
-                       username: 'test',
-                       password: 'test',
                        type: 'PROPFIND',
                        contentType: 'application/xml',
                        headers: {Depth: '1'},
@@ -122,17 +161,55 @@ var WebDAVAccessor = {
                     }
                 });
                 return entries;
-            }, function() { return $.Deferred().reject("List error.").promise() });
+            }, function(jqXHR) {
+                if (create && !_triedCreateDirectories && (jqXHR.status == '403' ||
+                                                           jqXHR.status == '404' ||
+                                                           jqXHR.status == '409')) {
+                    /* create ancestor directories */
+                    return lthis._tryCreateDirectories(path).pipe(function() {
+                        return lthis.list(path, create, true);
+                    });
+                } else {
+                    return $.Deferred().reject("List error.").promise()
+                }
+            });
     },
-    acquireLock: function(path) {
+    /* we do not use WebDAV locking but rather implement create-if-not-exists
+     * using the If-None-Match request header and the Last-Modified response header */
+    acquireLock: function(path, _triedCreateDirectories) {
+        var lthis = this;
         console.log("Request to lock  " + path);
-        /* TODO */
-        return $.when(true).promise();
+        return $.ajax({url: path,
+                       data: '',
+                       contentType: '',
+                       type: 'PUT',
+                       dataType: 'text',
+                       headers: {'If-None-Match': '*'}})
+            .pipe(function() {
+                return $.when(true).promise();
+            }, function(jqXHR) {
+                if (!_triedCreateDirectories && (jqXHR.status == '403' || jqXHR.status == '409')) {
+                    /* create ancestor directories */
+                    return lthis._tryCreateDirectories(path).pipe(function() {
+                        return lthis.acquireLock(path, true);
+                    });
+                }
+                if (jqXHR.status != '412')
+                    return $.Deferred().reject("Error acquiring lock: " + jqXHR.status).promise();
+                return lthis._getFileAge(path).pipe(function(age) {
+                    return $.when(false, age);
+                }, function() {
+                    return $.Deferred().reject("Error acquiring lock: Unable to determine lock age.").promise();
+                });
+            });
     },
     releaseLock: function(path) {
         console.log("Request to ulock " + path);
-        /* TODO */
-        return $.when(true).promise();
+        return $.ajax({url: path, type: 'DELETE'}).pipe(function() {
+            return true;
+        }, function() {
+            return $.Deferred().reject("Error releasing lock.").promise();
+        });
     }
 }
 
