@@ -216,7 +216,7 @@ DBInterface.prototype._readJSONFilesInDir = function(dir, noCreate) {
     return this._listDir(dir, noCreate).pipe(function(files) {
         var processes = [];
         files.forEach(function(f) {
-            if (!f.match('\.lock$'))
+            if (!f.match('_lock$'))
                 processes.push(lthis._readJSON(dir + '/' + f));
         });
         return DeferredSynchronizer(processes);
@@ -342,7 +342,7 @@ DBInterface.prototype._acquireLock = function(path) {
     var maxAge = 4000; /* remove locks older than four seconds */
     var retryTime = 100; /* retry every 100 ms */
 
-    return this._fs.acquireLock(this._path + '/' + path + '.lock').pipe(function(success, age) {
+    return this._fs.acquireLock(this._path + '/' + path + '_lock').pipe(function(success, age) {
         if (success)
             return true;
         if (age < maxAge) {
@@ -355,7 +355,7 @@ DBInterface.prototype._acquireLock = function(path) {
             return d.promise();
         } else {
             logger.showDebug("Forcibly removed lock on " + path);
-            return lthis._fs.releaseLock(lthis._path + '/' + path + '.lock').pipe(function() {
+            return lthis._fs.releaseLock(lthis._path + '/' + path + '_lock').pipe(function() {
                 return lthis._acquireLock(path);
             });
         }
@@ -363,7 +363,7 @@ DBInterface.prototype._acquireLock = function(path) {
 }
 DBInterface.prototype._releaseLock = function(path) {
     /* XXX ignore errors for inexistent locks? */
-    return this._fs.releaseLock(this._path + '/' + path + '.lock');
+    return this._fs.releaseLock(this._path + '/' + path + '_lock');
 }
 DBInterface.prototype._getPathForDoc = function(doc) {
     if (doc.type === 'note') {
