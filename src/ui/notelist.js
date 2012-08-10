@@ -7,6 +7,8 @@ function NoteList() {
     this._changeListener = null;
     this._sortStyle = 'tag'; /* XXX we should extract that from the html */
 
+    this._currentHilight = null;
+
     var lthis = this;
 
     this._installChangeListener();
@@ -50,17 +52,33 @@ NoteList.prototype.update = function() {
     });
     this._setListHilight(noteBrowser.currentNoteID.get());
 }
-NoteList.prototype._getNoteLink = function(note, sortKey) {
-    return $('<li id="noteList_' + note.getID() + '"/>')
-        .data('sortKey', sortKey)
-        .append($('<a/>', {href: '#' + encodeURIComponent(note.getID())})
-                .text(note.getTitle()));
+NoteList.prototype._getNoteLink = function(note, sortKey, treeNode) {
+    var lthis = this;
+    var li = $('<li class="noteList_' + note.getID() + '"/>')
+        .data('sortKey', sortKey);
+    var link = $('<a/>', {href: '#' + encodeURIComponent(note.getID())})
+        .text(note.getTitle())
+        .appendTo(li);
+    if (treeNode) {
+        $('<span class="treeicon"/>')
+            .click(function() {
+                /* we have to determine it manually since
+                 * this node can get cloned */
+                var li = $(this).closest('li');
+                li.toggleClass('open');
+                lthis._treeNodeToggled(li, note.getID());
+                return false;
+            })
+            .prependTo(link);
+    }
+    return li;
 }
 NoteList.prototype._setListHilight = function(id) {
+    this._currentHilight = id;
     $('#noteList li').removeClass('active');
     /* XXX how to escape? */
     if (id !== null)
-        $('#noteList_' + id).addClass('active');
+        $('.noteList_' + id).addClass('active');
 }
 NoteList.prototype._installChangeListener = function() {
     var lthis = this;
@@ -88,7 +106,7 @@ NoteList.prototype._dateToDayStr = function(date) {
 }
 NoteList.prototype._removeNote = function(note) {
     /* XXX how to escape? */
-    $('#noteList_' + note.getID()).remove();
+    $('.noteList_' + note.getID()).remove();
 }
 NoteList.prototype._findElementPosition = function(key, list, reversed) {
     var a = 0, b = list.length;
@@ -140,14 +158,31 @@ NoteList.prototype._insertNote = function(note) {
         var l = this._getNoteLink(note, note.getTitle());
         this._insertElement(l, $('#noteList'), $('li', '#noteList'));
     } else if (this._sortStyle === 'tag') {
-        /* XXX actually we should also include at least one note of each
-         * unreachable cycle */
+        /* If this note has no tags, insert it at the root.
+         * Otherwise, insert it below each opened display of its tags
+         */
+        /* XXX this results in tag-cycles to be invisible.
+         * include at least one note of each unreachable cycle */
+
+        var tags = note.getTags();
         var tagExists = function(tag) {
             return objectCache.getNoteByID(tag) !== undefined;
         }
-        if (note.getTags().some(tagExists)) return;
-        var l = this._getNoteLink(note, note.getTitle());
-        this._insertElement(l, $('#noteList'), $('li', '#noteList'));
+
+        var parents = $();
+        if (tags.some(tagExists)) {
+            tags.forEach(function(tag) {
+                /* XXX how to escape? */
+                parents = parents.add('.noteList_' + tag + '.open > ul');
+            });
+        } else {
+            parents = $('#noteList');
+        }
+
+        var l = this._getNoteLink(note, note.getTitle(), true);
+        parents.each(function(i, par) {
+            lthis._insertElement(l.clone(true), par, $(par).children('li'));
+        });
     } else {
         var date = this._dateToDayStr(note.getDate());
         var headers = $('li[class=nav-header]', '#noteList');
@@ -183,7 +218,11 @@ NoteList.prototype._insertNote = function(note) {
     }
 
 
+    if (note.getID() === this._currentHilight)
+        this._setListHilight(this._currentHilight);
+    
     /* TODO find some nice effect */
+    /*
     $('a', l)
         .css('color', 'white')
         .delay(500)
@@ -191,6 +230,22 @@ NoteList.prototype._insertNote = function(note) {
             $(this).css('color', '');
             next();
         });
+    */
+}
+NoteList.prototype._treeNodeToggled = function(node, noteID) {
+    var lthis = this;
+    if (node.hasClass('open')) {
+        var ul = $('<ul class="nav nav-list"/>').appendTo(node);
+        $.each(objectCache.getNotesByTag(noteID), function(id, note) {
+            var l = lthis._getNoteLink(note, note.getTitle(), true);
+            lthis._insertElement(l, ul, ul.children('li'));
+        });
+        if (this._currentHilight !== null)
+            this._setListHilight(this._currentHilight);
+    
+    } else {
+        node.children('ul').remove();
+    }
 }
 
 return new NoteList();
