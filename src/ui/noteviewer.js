@@ -1,6 +1,7 @@
 define(['jquery', 'showdown',
         'ui/revisiongraph', 'ui/logger',
-        'db/local', 'db/objectcache'], function($, Showdown, RevisionGraph, logger, db, objectCache) {
+        'util/deferredsynchronizer',
+        'db/local', 'db/objectcache'], function($, Showdown, RevisionGraph, logger, DeferredSynchronizer, db, objectCache) {
 "use strict";
 
 function NoteViewer() {
@@ -213,6 +214,8 @@ NoteViewer.prototype._doRenderSubtags = function() {
     renderRec(this._note.getID(), tagAreas, {});
 }
 NoteViewer.prototype._doRender = function(math) {
+    var lthis = this;
+
     this._renderTimer = null;
 
     var start = (new Date()) - 0;
@@ -228,13 +231,41 @@ NoteViewer.prototype._doRender = function(math) {
     this._viewAreaText
         .empty()
         .append(this._showdown.makeHtml(text));
-    if (math && window.MathJax)
-        window.MathJax.Hub.Queue(["Typeset", MathJax.Hub, this._viewAreaText[0]]);
 
+    if (math && window.MathJax) {
+        this._getMathHeaderTexts().pipe(function(headerText) {
+            if (headerText.length > 0)
+                lthis._viewAreaText.prepend($('<div style="display: none;"/>').text(headerText));
+            var text = lthis._viewAreaText[0];
+            window.MathJax.Hub.Queue(["Typeset", MathJax.Hub, text]);
+        });
+    }
+
+    /* this includes the time for math rendering if the header text is
+     * available right away */
     this._lastRenderDuration = (new Date()) - start;
     if (this._editMode) {
         $('textarea', this._editArea).height(Math.max(800, $('#viewAreaText').height()));
     }
+}
+NoteViewer.prototype._getMathHeaderTexts = function() {
+    var processes = [];
+    var headerText = '';
+
+    this._noteTags.forEach(function(tagID) {
+        var prefix = "math header";
+        var tag = objectCache.getNoteByID(tagID);
+        if (tag === undefined)
+            return;
+        if (tag.getTitle().substr(0, prefix.length) !== prefix)
+            return;
+        processes.push(tag.getHeadRevision().pipe(function(hr) {
+            headerText += hr.getText().replace(/^\s*#(.+)/, '') + '\n\n';
+        }));
+    });
+    return DeferredSynchronizer(processes).pipe(function() {
+        return headerText;
+    });
 }
 NoteViewer.prototype.closeNote = function() {
     this._note = null;
