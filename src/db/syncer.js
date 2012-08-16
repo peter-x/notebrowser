@@ -138,7 +138,7 @@ function pushRevisions(target, revsToIgnore, messageBox) {
     return proc.pipe(function(res) {
         var revisionIDsToPush = [];
         res.revisions.forEach(function(rev) {
-            if (rev in revsToIgnore)
+            if (!(rev in revsToIgnore))
                 revisionIDsToPush.push(rev);
         });
         var lastSeq = res.lastSeq;
