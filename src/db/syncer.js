@@ -78,8 +78,8 @@ function fetchRevisions(target, remoteDB, ids, lastSeq, messageBox) {
                          * update the objects? */
 
                         /* TODO really do this in parallel? */
-                        var processes = $.map(NoteRevision.determineHeadRevisions($.map(checkedObjects, function(x) { return x; }),
-                                                function(revisions, noteID) {
+                        var objs = $.map(checkedObjects, function(x) { return x; });
+                        var processes = $.map(NoteRevision.determineHeadRevisions(objs), function(revisions, noteID) {
                             /* TODO merge these in one change file */
                             if (target.isSelective()) {
                                 /* TODO we do not want arbitrary people to cause
@@ -105,7 +105,7 @@ function fetchRevisions(target, remoteDB, ids, lastSeq, messageBox) {
                                 }
                                 logger.showInfo($("<span/>").text(text).append(link), messageBox, true);
                             });
-                        }));
+                        });
                         /* XXX suppress change log */
                         processes.push(target.setRemoteSeq(lastSeq));
                         return DeferredSynchronizer(processes).pipe(function() {
