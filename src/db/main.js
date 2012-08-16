@@ -48,6 +48,35 @@ DBInterface.prototype._pathFromDocumentLocation = function() {
         return path.substr(0, i);
     }
 }
+/* XXX should be pulled out to its own class */
+/* XXX in that class, change the file layout to use subdirectories using the
+ * following scheme:
+ * file 3765 is put into 4/3/7/6/5 (where the first number is the length)
+ * file 37xx is put into 4/3/7/summary (XXX find a better name)
+ */
+DBInterface.prototype._getChange = function(seq) {
+    return this._readJSON('data/changes/' + seq);
+}
+DBInterface.prototype._getChangeSummary = function(prefix, droppedDigits) {
+    return this._readJSON('data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'));
+}
+DBInterface.prototype._writeChangeSummary = function(prefix, droppedDigits, data) {
+    data = JSON.stringify(data);
+    return this._fs.write(this._path + '/data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'), data);
+}
+DBInterface.prototype._changeExists = function(seq) {
+    return this._fs.exists(this._path + '/data/changes/' + seq);
+}
+DBInterface.prototype._determineLastChangeSeq = function() {
+    return this._listDir('data/changes').pipe(function(files) {
+        var largest = 0;
+        files.forEach(function(f) {
+            if (f.match(/^\d*$/) && f - 0 > largest)
+                largest = f - 0;
+        });
+        return largest;
+    });
+}
 /* XXX remove changeInterval on destruction */
 DBInterface.prototype._initChangeListener = function() {
     var lthis = this;
@@ -55,7 +84,7 @@ DBInterface.prototype._initChangeListener = function() {
     function checkForChanges() {
         /* XXX avoid duplicate change notifications */
         var i = lthis._lastChangeSeq + 1;
-        lthis._fs.exists(lthis._path + '/data/changes/' + i).done(function(ex) {
+        lthis._changeExists(i).done(function(ex) {
             /* XXX what if it exists but is still empty? */
             if (!ex) return;
             lthis._lastChangeSeq = Math.max(lthis._lastChangeSeq, i);
@@ -63,7 +92,7 @@ DBInterface.prototype._initChangeListener = function() {
                 delete lthis._changeSeqsToIgnore[i];
                 return;
             }
-            lthis._readJSON('data/changes/' + i).done(function(change) {
+            lthis._getChange(i).done(function(change) {
                 change.changes.forEach(function(path) {
                     lthis._readJSON(path).done(function(doc) {
                         lthis._sendChangeToCache(doc);
@@ -74,13 +103,8 @@ DBInterface.prototype._initChangeListener = function() {
         });
 
     }
-    lthis._listDir('data/changes').pipe(function(files) {
-        var largest = 0;
-        files.forEach(function(f) {
-            if (f !== 'lock' && f - 0 > largest)
-                largest = f - 0;
-        });
-        lthis._lastChangeSeq = largest;
+    this._determineLastChangeSeq().pipe(function(changeSeq) {
+        lthis._lastChangeSeq = changeSeq;
         lthis._changeInterval = window.setInterval(checkForChanges, 1000);
         lthis._initialized = true;
         return lthis._initCache();
@@ -282,6 +306,26 @@ DBInterface.prototype.getRevisionMetadata = function(noteID) {
         return objs;
     });
 }
+DBInterface.prototype.getAllRevisions = function() {
+    if (!this._initialized)
+        return $.Deferred().reject("Not connected to database.").promise();
+
+    var lthis = this;
+    var allRevisions = [];
+
+    return this._listDir('data/notes/').pipe(function(notes) {
+        var procs = [];
+        return DeferredSynchronizer(notes.map(function(note) {
+            return lthis._listDir('data/notes/' + note).pipe(function(revs) {
+                revs.forEach(function(rev) {
+                    allRevisions.push(note + '/' + rev);
+                });
+            });
+        })).pipe(function() {
+            return allRevisions;
+        });
+    });
+}
 /* noteID can be: note also works for an array of noteIDs
  * and even for a noteID -> seqID mapping */
 DBInterface.prototype.changedRevisions = function(noteID, after, onlyRemoteChanges) {
@@ -316,26 +360,113 @@ DBInterface.prototype.changedRevisions = function(noteID, after, onlyRemoteChang
         }
     }
 
-    function getChanges(i) {
-        return lthis._readJSON('data/changes/' + i).pipe(function(data) {
-            if (!onlyRemoteChanges || data.type === 'remote') {
-                data.changes.forEach(function(path) {
-                    if (matches(path, i))
-                        revs.push(path.substr(idPrefix.length));
-                });
-            }
-            return getChanges(i + 1);
+    return this._getChanges(after + 1, null, function(seq, data) {
+        if (!onlyRemoteChanges || data.type === 'remote') {
+            data.changes.forEach(function(path) {
+                if (matches(path, seq))
+                    revs.push(path.substr(idPrefix.length));
+            });
+        }
+    }).pipe(function(lastSeq) {
+        return $.when({lastSeq: lastSeq, revisions: revs});
+    });
+}
+/* callback(i, changes) is called for each from <= i <= to
+ * to can be null denoting the larget change available
+ * returns the sequence number of the last change
+ */
+DBInterface.prototype._getChanges = function(from, to, callback) {
+    var lthis = this;
+    /*
+     * summary files are written after a file that ends in 9
+     * it contains all indices and the data
+     */
+    /* request for changes between 7 and 995
+     * -> read 7, 8, 9, 1x, 2x, ..., 9x, 1xx, 2xx, ..., 9xx
+     * request for changes between 7443 and 7484
+     * -> do not read 7xxx but read 74xx
+     */
+
+
+    function findLongestCommonPrefix(f, t) {
+        if (t === null || f.length !== t.length || f[0] !== t[0])
+            return null;
+
+        if (f === t)
+            return {prefix: f, f: '', t: ''};
+
+        var p = 0;
+        while (f[p] === t[p]) p ++;
+
+        return {prefix: f.substr(0, p),
+                f: f.substr(p),
+                t: f.substr(p)};
+    }
+    function nextPowerOfTen(x, digits) {
+        var p = Math.pow(10, digits);
+        return (Math.floor(x / p) + 1) * p;
+    }
+
+    if (from === to) {
+        return this._getChange(from).pipe(function(data) {
+            callback(from, data);
+            return from;
         }, function(err) {
             /* XXX more robust error type detection */
             if (err.substr(0, 10) === "JSON error") {
-                return getChanges(i + 1);
+                return $.when(from);
             } else {
-                return $.when({lastSeq: i - 1, revisions: revs});
+                return $.when(from - 1);
             }
         });
     }
-    
-    return getChanges(after + 1);
+
+    var p = findLongestCommonPrefix('' + from, to === null ? null : '' + to);
+
+    if (p !== null) {
+        return this._getChangeSummary(p.prefix - 0, p.f.length).pipe(function(summary) {
+            for (var i = from; i <= to; i ++) {
+                callback(i, summary[i]);
+            }
+            return to;
+        }, function() {
+            /* summary is not available, go one level deeper */
+            var calls = [];
+
+            var digits = p.f.length - 1;
+            var s = from;
+            var n = nextPowerOfTen(from, digits);
+            while (n - 1 < to) {
+                calls.push([s, n - 1, callback]);
+                s = n;
+                n = nextPowerOfTen(n, digits);
+            }
+            calls.push([s, to, callback]);
+            function loop() {
+                if (calls.length == 0)
+                    return $.when(to);
+
+                var args = calls.shift();
+                return lthis._getChanges.apply(lthis, args).pipe(function(ret) {
+                    if (ret === args[1]) { /* everything worked */
+                        return loop();
+                    } else {
+                        return ret;
+                    }
+                });
+            }
+            return loop();
+        });
+    } else {
+        var digits = ('' + from).length - 1;
+        var splitPoint = nextPowerOfTen(from, digits);
+
+        return this._getChanges(from, splitPoint - 1, callback).pipe(function(ret) {
+            if (ret !== splitPoint - 1)
+                return ret;
+            return lthis._getChanges(splitPoint, to, callback);
+        });
+    }
 }
 DBInterface.prototype._acquireLock = function(path) {
     var lthis = this;
@@ -466,6 +597,9 @@ DBInterface.prototype._logChanges = function(changes, docs) {
             lthis._changeSeqsToIgnore[i] = 1;
             return lthis._fs.write(lthis._path + '/data/changes/' + i, data).pipe(function() {
                 return lthis._releaseLock('data/changes').pipe(function() {
+                    if (i % 10 === 9) {
+                        lthis._writeChangeSummaryFiles(i);
+                    }
                     if (!lthis._remote) {
                         docs.forEach(function(doc) {
                             lthis._sendChangeToCache(doc);
@@ -477,6 +611,29 @@ DBInterface.prototype._logChanges = function(changes, docs) {
             });
 
         });
+    });
+}
+DBInterface.prototype._writeChangeSummaryFiles = function(seq) {
+    var digits = 1;
+    while (true) {
+        var exp = Math.pow(10, digits);
+        if (exp > seq + 1 || (seq + 1) % exp !== 0)
+            return;
+
+        var prefix = Math.floor(seq / exp);
+        this._writeChangeSummaryFile(prefix, digits);
+        digits ++;
+    }
+}
+DBInterface.prototype._writeChangeSummaryFile = function(prefix, digits) {
+    var lthis = this;
+
+    var changes = {};
+    var exp = Math.pow(10, digits);
+    return this._getChanges(prefix * exp, (prefix + 1) * exp - 1, function(seq, change) {
+        changes[seq] = change;
+    }).pipe(function() {
+        return lthis._writeChangeSummary(prefix, digits, changes);
     });
 }
 DBInterface.prototype.saveDoc = function(doc, options) {
