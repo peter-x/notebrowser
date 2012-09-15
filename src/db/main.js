@@ -2,17 +2,16 @@
  * we use the special exports object to overcome that */
 define(['jquery', 'crypto', 'ui/logger',
         'util/events', 'util/deferredsynchronizer',
-        'db/objects', 'db/accessors', 'db/objectcache',
+        'db/jsonstorage', 'db/objects', 'db/objectcache',
         'exports'],
         function($, Crypto, logger,
                  Events, DeferredSynchronizer,
-                 Objects, Accessors, objectCache,
+                 JSONStorage, Objects, objectCache,
                  exports) {
 "use strict";
 
 function DBInterface(path, remote) {
-    this._path = path || this._pathFromDocumentLocation();
-    this._fs = null;
+    this._storage = new JSONStorage(path);
     this._remote = remote;
 
     this._changeInterval = null;
@@ -21,8 +20,6 @@ function DBInterface(path, remote) {
     this._changeSeqsToIgnore = {};
 
     this._suppressedChangeLogEntries = [[], []];
-
-    this._fs = Accessors(this._path);
 
     if (remote) {
         this._initialized = true;
@@ -34,20 +31,6 @@ function DBInterface(path, remote) {
         }, 10);
     }
 }
-DBInterface.prototype._pathFromDocumentLocation = function() {
-    var path;
-    if (document.location.protocol == 'http:' || document.location.protocol == 'https:') {
-        path = document.location.href; /* XXX unescape? */
-    } else {
-        path = unescape(document.location.pathname);
-    }
-    var i = path.lastIndexOf('/');
-    if (i < 0) {
-        return path;
-    } else {
-        return path.substr(0, i);
-    }
-}
 /* XXX should be pulled out to its own class */
 /* XXX in that class, change the file layout to use subdirectories using the
  * following scheme:
@@ -55,20 +38,19 @@ DBInterface.prototype._pathFromDocumentLocation = function() {
  * file 37xx is put into 4/3/7/summary (XXX find a better name)
  */
 DBInterface.prototype._getChange = function(seq) {
-    return this._readJSON('data/changes/' + seq);
+    return this._storage.read('data/changes/' + seq);
 }
 DBInterface.prototype._getChangeSummary = function(prefix, droppedDigits) {
-    return this._readJSON('data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'));
+    return this._storage.read('data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'));
 }
 DBInterface.prototype._writeChangeSummary = function(prefix, droppedDigits, data) {
-    data = JSON.stringify(data);
-    return this._fs.write(this._path + '/data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'), data);
+    return this._storage.write('data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'), data);
 }
 DBInterface.prototype._changeExists = function(seq) {
-    return this._fs.exists(this._path + '/data/changes/' + seq);
+    return this._storage.exists('data/changes/' + seq);
 }
 DBInterface.prototype._determineLastChangeSeq = function() {
-    return this._listDir('data/changes').pipe(function(files) {
+    return this._storage.listDir('data/changes').pipe(function(files) {
         var largest = 0;
         files.forEach(function(f) {
             if (f.match(/^\d*$/) && f - 0 > largest)
@@ -94,7 +76,7 @@ DBInterface.prototype._initChangeListener = function() {
             }
             lthis._getChange(i).done(function(change) {
                 change.changes.forEach(function(path) {
-                    lthis._readJSON(path).done(function(doc) {
+                    lthis._storage.read(path).done(function(doc) {
                         lthis._sendChangeToCache(doc);
                         lthis._trigger('change', doc);
                     });
@@ -144,12 +126,12 @@ DBInterface.prototype._initMergeService = function() {
     var mergeChanges = function() {
         if (runningMyself) return;
         runningMyself = true;
-        lthis._acquireLock(dataFile).pipe(function() {
-            lthis._readJSON(dataFile)
+        lthis._storage.acquireLock(dataFile).pipe(function() {
+            lthis._storage.read(dataFile)
                 .pipe(function(data) { return mergeAfter(data || 0); },
                       function() { return mergeAfter(0); })
                 .done(function() {
-                    lthis._releaseLock(dataFile);
+                    lthis._storage.releaseLock(dataFile);
                     runningMyself = false;
                 });
         });
@@ -174,7 +156,7 @@ DBInterface.prototype._initMergeService = function() {
                     /* TODO merge these in one change file */
                     return Objects.Note.mergeHeadsAndUpdate(noteID, revisions);
                 })).pipe(function() {
-                    return lthis._fs.write(lthis._path + '/' + dataFile, '' + res.lastSeq);
+                    return lthis._storage.write(dataFile, res.lastSeq);
                 });
             });
         });
@@ -193,7 +175,7 @@ DBInterface.prototype.determineAvailableNoteRevisions = function(keys) {
     var available = {};
     return DeferredSynchronizer(keys.map(function(key) {
         /* XXX sanity check for key */
-        return lthis._fs.exists(lthis._path + '/data/notes/' + key).pipe(function(res) {
+        return lthis._storage.exists('data/notes/' + key).pipe(function(res) {
                 if (res) available[key] = 1;
             });
     })).pipe(function() {
@@ -205,7 +187,7 @@ DBInterface.prototype.getAllNotes = function() {
         return $.Deferred().reject("Not connected to database.").promise();
 
     var lthis = this;
-    return this._readJSONFilesInDir('data_local/notes').pipe(function(objs) {
+    return this._storage.readFilesInDir('data_local/notes').pipe(function(objs) {
         var notes = [];
         objs.forEach(function(o) {
             try {
@@ -223,7 +205,7 @@ DBInterface.prototype.getAllSyncTargets = function() {
     
     var lthis = this;
     var path = this._path;
-    return this._readJSONFilesInDir('data_local/syncTargets').pipe(function(objs) {
+    return this._storage.readFilesInDir('data_local/syncTargets').pipe(function(objs) {
         var targets = [];
         objs.forEach(function(o) {
             try {
@@ -234,29 +216,6 @@ DBInterface.prototype.getAllSyncTargets = function() {
         });
         return targets;
     });
-}
-DBInterface.prototype._readJSONFilesInDir = function(dir, noCreate) {
-    var lthis = this;
-    return this._listDir(dir, noCreate).pipe(function(files) {
-        var processes = [];
-        files.forEach(function(f) {
-            if (!f.match('_lock$'))
-                processes.push(lthis._readJSON(dir + '/' + f));
-        });
-        return DeferredSynchronizer(processes);
-    });
-}
-DBInterface.prototype._readJSON = function(path) {
-    return this._fs.read(this._path + '/' + path).pipe(function(data) {
-        try {
-            return JSON.parse(data);
-        } catch (e) {
-            return $.Deferred().reject("JSON error: " + e.message).promise();
-        }
-    });
-}
-DBInterface.prototype._listDir = function(dir, noCreate) {
-    return this._fs.list(this._path + '/' + dir, !noCreate);
 }
 DBInterface.prototype.getDoc = function(id) {
     if (!this._initialized)
@@ -270,11 +229,11 @@ DBInterface.prototype._getDoc = function(id) {
 
     var lthis = this;
     if (id.match(/\//)) {
-        return this._readJSON('data/notes/' + id);
+        return this._storage.read('data/notes/' + id);
     } else {
-        return this._readJSON('data_local/notes/' + id).pipe(null,
+        return this._storage.read('data_local/notes/' + id).pipe(null,
             function(err) {
-                return lthis._readJSON('data_local/syncTargets/' + id);
+                return lthis._storage.read('data_local/syncTargets/' + id);
             });
     }
 }
@@ -293,7 +252,7 @@ DBInterface.prototype.getRevisionMetadata = function(noteID) {
 
     var lthis = this;
     var path = this._path;
-    return this._readJSONFilesInDir('data/notes/' + noteID, true).pipe(function(objList) {
+    return this._storage.readFilesInDir('data/notes/' + noteID, true).pipe(function(objList) {
         var objs = {};
         objList.forEach(function(o) {
             try {
@@ -313,10 +272,10 @@ DBInterface.prototype.getAllRevisions = function() {
     var lthis = this;
     var allRevisions = [];
 
-    return this._listDir('data/notes/').pipe(function(notes) {
+    return this._storage.listDir('data/notes/').pipe(function(notes) {
         var procs = [];
         return DeferredSynchronizer(notes.map(function(note) {
-            return lthis._listDir('data/notes/' + note).pipe(function(revs) {
+            return lthis._storage.listDir('data/notes/' + note).pipe(function(revs) {
                 revs.forEach(function(rev) {
                     allRevisions.push(note + '/' + rev);
                 });
@@ -413,7 +372,7 @@ DBInterface.prototype._getChanges = function(from, to, callback) {
             return from;
         }, function(err) {
             /* XXX more robust error type detection */
-            if (err.substr(0, 10) === "JSON error") {
+            if (err.substr(0, 14) === "Error decoding") {
                 return $.when(from);
             } else {
                 return $.when(from - 1);
@@ -468,34 +427,6 @@ DBInterface.prototype._getChanges = function(from, to, callback) {
         });
     }
 }
-DBInterface.prototype._acquireLock = function(path) {
-    var lthis = this;
-    var maxAge = 4000; /* remove locks older than four seconds */
-    var retryTime = 100; /* retry every 100 ms */
-
-    return this._fs.acquireLock(this._path + '/' + path + '_lock').pipe(function(success, age) {
-        if (success)
-            return true;
-        if (age < maxAge) {
-            var d = $.Deferred();
-            window.setTimeout(function() {
-                lthis._acquireLock(path)
-                    .done(function() { d.resolve.apply(d, arguments); })
-                    .fail(function() { d.reject.apply(d, arguments); });
-            }, retryTime);
-            return d.promise();
-        } else {
-            logger.showDebug("Forcibly removed lock on " + path);
-            return lthis._fs.releaseLock(lthis._path + '/' + path + '_lock').pipe(function() {
-                return lthis._acquireLock(path);
-            });
-        }
-    });
-}
-DBInterface.prototype._releaseLock = function(path) {
-    /* XXX ignore errors for inexistent locks? */
-    return this._fs.releaseLock(this._path + '/' + path + '_lock');
-}
 DBInterface.prototype._getPathForDoc = function(doc) {
     if (doc.type === 'note') {
         return 'data_local/notes/' + doc._id;
@@ -531,23 +462,17 @@ DBInterface.prototype._saveDoc = function(doc, options) {
 
     /* XXX also release the lock on errors */
 
-    var data;
-    try {
-        data = JSON.stringify(doc);
-    } catch (e) {
-        return $.Deferred().reject("Invalid data in document: " + e.message).promise();
-    }
     if (options['suppressLocking']) {
-        return this._fs.write(this._path + '/' + path, data).pipe(logChange);
+        return this._storage.write(path, doc).pipe(logChange);
     }
-    return this._acquireLock(path).pipe(function() {
-        return lthis._readJSON(path).pipe(function(olddoc) {
+    return this._storage.acquireLock(path).pipe(function() {
+        return lthis._storage.read(path).pipe(function(olddoc) {
             if (olddoc._rev === doc._rev) {
                 /* no conflict, no save */
-                return lthis._releaseLock(path).pipe(function() { return null; });
+                return lthis._storage.releaseLock(path).pipe(function() { return null; });
             } else if (!lthis._olderRev(olddoc._rev, doc._rev)) {
                 /* conflict */
-                return lthis._releaseLock(path).pipe(function() { return olddoc; });
+                return lthis._storage.releaseLock(path).pipe(function() { return olddoc; });
             } else {
                 return writeAndReleaseLock();
             }
@@ -557,8 +482,8 @@ DBInterface.prototype._saveDoc = function(doc, options) {
     });
 
     function writeAndReleaseLock() {
-        return lthis._fs.write(lthis._path + '/' + path, data).pipe(function() {
-            return lthis._releaseLock(path).pipe(logChange);
+        return lthis._storage.write(path, doc).pipe(function() {
+            return lthis._storage.releaseLock(path).pipe(logChange);
         });
     }
     function logChange() {
@@ -587,16 +512,16 @@ DBInterface.prototype._logChanges = function(changes, docs) {
     }
 
     function findNextFreeChangeFile(i) {
-        return lthis._fs.exists(lthis._path + '/data/changes/' + i).pipe(function(ex) {
+        return lthis._storage.exists('data/changes/' + i).pipe(function(ex) {
             return ex ? findNextFreeChangeFile(i + 1) : i;
         });
     }
-    var data = JSON.stringify({type: this._remote ? 'remote' : 'local', changes: changes});
-    return this._acquireLock('data/changes').pipe(function() {
+    var data = {type: this._remote ? 'remote' : 'local', changes: changes};
+    return this._storage.acquireLock('data/changes').pipe(function() {
         return findNextFreeChangeFile(lthis._lastChangeSeq + 1).pipe(function(i) {
             lthis._changeSeqsToIgnore[i] = 1;
-            return lthis._fs.write(lthis._path + '/data/changes/' + i, data).pipe(function() {
-                return lthis._releaseLock('data/changes').pipe(function() {
+            return lthis._storage.write(lthis._path + '/data/changes/' + i, data).pipe(function() {
+                return lthis._storage.releaseLock('data/changes').pipe(function() {
                     if (i % 10 === 9) {
                         lthis._writeChangeSummaryFiles(i);
                     }
@@ -609,7 +534,6 @@ DBInterface.prototype._logChanges = function(changes, docs) {
                     return true;
                 });
             });
-
         });
     });
 }
