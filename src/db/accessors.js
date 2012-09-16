@@ -20,7 +20,7 @@ function tryNetscape() {
     }
     return true;
 }
-var javaLoader;
+var javaLoader = null;
 
 function tryJava() {
     $(function() {
@@ -456,7 +456,8 @@ return function(path) {
     } else if (tryNetscape()) {
         return NetscapeAccessor;
     } else {
-        javaLoader = tryJava();
+        if (javaLoader === null)
+           javaLoader = tryJava();
         return JavaAccessor;
     }
 }
