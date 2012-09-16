@@ -2,24 +2,25 @@
  * we use the special exports object to overcome that */
 define(['jquery', 'crypto', 'ui/logger',
         'util/events', 'util/deferredsynchronizer',
-        'db/jsonstorage', 'db/objects', 'db/objectcache',
+        'db/jsonstorage', 'db/objects', 'db/changelog', 'db/objectcache',
         'exports'],
         function($, Crypto, logger,
                  Events, DeferredSynchronizer,
-                 JSONStorage, Objects, objectCache,
+                 JSONStorage, Objects, ChangeLog, objectCache,
                  exports) {
 "use strict";
 
 function DBInterface(path, remote) {
+    path = path || this._pathFromDocumentLocation();
     this._storage = new JSONStorage(path);
     this._remote = remote;
 
-    this._changeInterval = null;
-    this._initialized = false;
-    this._lastChangeSeq = 0;
-    this._changeSeqsToIgnore = {};
+    this._sharedChangeLog = new ChangeLog(new JSONStorage(path + '/data/changes'), remote);
+    this._localChangeLog = null;
+    if (!this._remote)
+        this._localChangeLog = new ChangeLog(new JSONStorage(path + '/data_local/changes'), false);
 
-    this._suppressedChangeLogEntries = [[], []];
+    this._initialized = false;
 
     if (remote) {
         this._initialized = true;
@@ -27,72 +28,48 @@ function DBInterface(path, remote) {
         var lthis = this;
         window.setTimeout(function() {
             lthis._initMergeService();
-            lthis._initChangeListener();
+
+            var onChange = function(path, changeType, doc) {
+                var forwardChange = function(doc, changeType) {
+                    lthis._sendChangeToCache(doc);
+                    lthis._trigger('change', doc, changeType);
+                }
+                if (doc === undefined) {
+                    lthis._storage.read(path).pipe(function(doc) {
+                        forwardChange(doc, changeType);
+                    });
+                } else {
+                    forwardChange(doc, changeType);
+                }
+            }
+            lthis._localChangeLog.on('change', onChange);
+            lthis._sharedChangeLog.on('change', onChange);
+            lthis._localChangeLog.initChangeListener().pipe(function() {
+                lthis._sharedChangeLog.initChangeListener().pipe(function() {
+                    lthis._initialized = true;
+                    return lthis._initCache();
+                }, function(err) {
+                    lthis._trigger('init error', "Error initializing database: " + err);
+                });
+            }, function(err) {
+                lthis._trigger('init error', "Error initializing database: " + err);
+            });
         }, 10);
     }
 }
-/* XXX should be pulled out to its own class */
-/* XXX in that class, change the file layout to use subdirectories using the
- * following scheme:
- * file 3765 is put into 4/3/7/6/5 (where the first number is the length)
- * file 37xx is put into 4/3/7/summary (XXX find a better name)
- */
-DBInterface.prototype._getChange = function(seq) {
-    return this._storage.read('data/changes/' + seq);
-}
-DBInterface.prototype._getChangeSummary = function(prefix, droppedDigits) {
-    return this._storage.read('data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'));
-}
-DBInterface.prototype._writeChangeSummary = function(prefix, droppedDigits, data) {
-    return this._storage.write('data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'), data);
-}
-DBInterface.prototype._changeExists = function(seq) {
-    return this._storage.exists('data/changes/' + seq);
-}
-DBInterface.prototype._determineLastChangeSeq = function() {
-    return this._storage.listDir('data/changes').pipe(function(files) {
-        var largest = 0;
-        files.forEach(function(f) {
-            if (f.match(/^\d*$/) && f - 0 > largest)
-                largest = f - 0;
-        });
-        return largest;
-    });
-}
-/* XXX remove changeInterval on destruction */
-DBInterface.prototype._initChangeListener = function() {
-    var lthis = this;
-
-    function checkForChanges() {
-        /* XXX avoid duplicate change notifications */
-        var i = lthis._lastChangeSeq + 1;
-        lthis._changeExists(i).done(function(ex) {
-            /* XXX what if it exists but is still empty? */
-            if (!ex) return;
-            lthis._lastChangeSeq = Math.max(lthis._lastChangeSeq, i);
-            if (lthis._changeSeqsToIgnore[i]) {
-                delete lthis._changeSeqsToIgnore[i];
-                return;
-            }
-            lthis._getChange(i).done(function(change) {
-                change.changes.forEach(function(path) {
-                    lthis._storage.read(path).done(function(doc) {
-                        lthis._sendChangeToCache(doc);
-                        lthis._trigger('change', doc);
-                    });
-                });
-            });
-        });
-
+DBInterface.prototype._pathFromDocumentLocation = function() {
+    var path;
+    if (document.location.protocol == 'http:' || document.location.protocol == 'https:') {
+        path = document.location.href; /* XXX unescape? */
+    } else {
+        path = unescape(document.location.pathname);
     }
-    this._determineLastChangeSeq().pipe(function(changeSeq) {
-        lthis._lastChangeSeq = changeSeq;
-        lthis._changeInterval = window.setInterval(checkForChanges, 1000);
-        lthis._initialized = true;
-        return lthis._initCache();
-    }, function(err) {
-        lthis._trigger('init error', "Error initializing database: " + err);
-    });
+    var i = path.lastIndexOf('/');
+    if (i < 0) {
+        return path;
+    } else {
+        return path.substr(0, i);
+    }
 }
 DBInterface.prototype._initCache = function() {
     if (this.remote) /* this should actually not be called */
@@ -162,9 +139,11 @@ DBInterface.prototype._initMergeService = function() {
         });
     }
 
-    /* XXX use a flag that indicates if the change was a remote change, then the
-     * change file is read only once */
-    this.on('change', mergeChanges);
+    this._sharedChangeLog.on('change', function(path, changeType, doc) {
+        if (changeType === 'remote')
+            mergeChanges();
+    });
+
     this.on('ready', mergeChanges);
 }
 DBInterface.prototype.determineAvailableNoteRevisions = function(keys) {
@@ -204,7 +183,6 @@ DBInterface.prototype.getAllSyncTargets = function() {
         return $.Deferred().reject("Not connected to database.").promise();
     
     var lthis = this;
-    var path = this._path;
     return this._storage.readFilesInDir('data_local/syncTargets').pipe(function(objs) {
         var targets = [];
         objs.forEach(function(o) {
@@ -242,16 +220,21 @@ DBInterface.prototype.getDocs = function(ids) {
         return $.Deferred().reject("Not connected to database.").promise();
 
     var lthis = this;
+    var docs = [];
     return DeferredSynchronizer($.map(ids, function(id) {
-        return lthis._getDoc(id);
-    }));
+        return lthis._getDoc(id).pipe(function(doc) {
+            if (typeof(doc) === 'object' && '_id' in doc)
+                docs.push(doc);
+        });
+    })).pipe(function() {
+        return docs;
+    });
 }
 DBInterface.prototype.getRevisionMetadata = function(noteID) {
     if (!this._initialized)
         return $.Deferred().reject("Not connected to database.").promise();
 
     var lthis = this;
-    var path = this._path;
     return this._storage.readFilesInDir('data/notes/' + noteID, true).pipe(function(objList) {
         var objs = {};
         objList.forEach(function(o) {
@@ -319,7 +302,7 @@ DBInterface.prototype.changedRevisions = function(noteID, after, onlyRemoteChang
         }
     }
 
-    return this._getChanges(after + 1, null, function(seq, data) {
+    return this._sharedChangeLog.getChanges(after + 1, null, function(seq, data) {
         if (!onlyRemoteChanges || data.type === 'remote') {
             data.changes.forEach(function(path) {
                 if (matches(path, seq))
@@ -329,103 +312,6 @@ DBInterface.prototype.changedRevisions = function(noteID, after, onlyRemoteChang
     }).pipe(function(lastSeq) {
         return $.when({lastSeq: lastSeq, revisions: revs});
     });
-}
-/* callback(i, changes) is called for each from <= i <= to
- * to can be null denoting the larget change available
- * returns the sequence number of the last change
- */
-DBInterface.prototype._getChanges = function(from, to, callback) {
-    var lthis = this;
-    /*
-     * summary files are written after a file that ends in 9
-     * it contains all indices and the data
-     */
-    /* request for changes between 7 and 995
-     * -> read 7, 8, 9, 1x, 2x, ..., 9x, 1xx, 2xx, ..., 9xx
-     * request for changes between 7443 and 7484
-     * -> do not read 7xxx but read 74xx
-     */
-
-
-    function findLongestCommonPrefix(f, t) {
-        if (t === null || f.length !== t.length || f[0] !== t[0])
-            return null;
-
-        if (f === t)
-            return {prefix: f, f: '', t: ''};
-
-        var p = 0;
-        while (f[p] === t[p]) p ++;
-
-        return {prefix: f.substr(0, p),
-                f: f.substr(p),
-                t: f.substr(p)};
-    }
-    function nextPowerOfTen(x, digits) {
-        var p = Math.pow(10, digits);
-        return (Math.floor(x / p) + 1) * p;
-    }
-
-    if (from === to) {
-        return this._getChange(from).pipe(function(data) {
-            callback(from, data);
-            return from;
-        }, function(err) {
-            /* XXX more robust error type detection */
-            if (err.substr(0, 14) === "Error decoding") {
-                return $.when(from);
-            } else {
-                return $.when(from - 1);
-            }
-        });
-    }
-
-    var p = findLongestCommonPrefix('' + from, to === null ? null : '' + to);
-
-    if (p !== null) {
-        return this._getChangeSummary(p.prefix - 0, p.f.length).pipe(function(summary) {
-            for (var i = from; i <= to; i ++) {
-                callback(i, summary[i]);
-            }
-            return to;
-        }, function() {
-            /* summary is not available, go one level deeper */
-            var calls = [];
-
-            var digits = p.f.length - 1;
-            var s = from;
-            var n = nextPowerOfTen(from, digits);
-            while (n - 1 < to) {
-                calls.push([s, n - 1, callback]);
-                s = n;
-                n = nextPowerOfTen(n, digits);
-            }
-            calls.push([s, to, callback]);
-            function loop() {
-                if (calls.length == 0)
-                    return $.when(to);
-
-                var args = calls.shift();
-                return lthis._getChanges.apply(lthis, args).pipe(function(ret) {
-                    if (ret === args[1]) { /* everything worked */
-                        return loop();
-                    } else {
-                        return ret;
-                    }
-                });
-            }
-            return loop();
-        });
-    } else {
-        var digits = ('' + from).length - 1;
-        var splitPoint = nextPowerOfTen(from, digits);
-
-        return this._getChanges(from, splitPoint - 1, callback).pipe(function(ret) {
-            if (ret !== splitPoint - 1)
-                return ret;
-            return lthis._getChanges(splitPoint, to, callback);
-        });
-    }
 }
 DBInterface.prototype._getPathForDoc = function(doc) {
     if (doc.type === 'note') {
@@ -487,78 +373,16 @@ DBInterface.prototype._saveDoc = function(doc, options) {
         });
     }
     function logChange() {
-        if (options['suppressChangeLog']) {
-            lthis._suppressedChangeLogEntries[0].push(path);
-            lthis._suppressedChangeLogEntries[1].push(doc);
+        var changelog = (path.substr(0, 10) === 'data_local' ?
+                            lthis._localChangeLog : lthis._sharedChangeLog);
+        if (options['postponeChangeLog']) {
+            changelog.postponeLogging(path, doc);
             return null;
         }
-        return lthis._logChanges([path], [doc]).pipe(function() {
+        return changelog.logChanges([path], [doc]).pipe(function() {
             return null;
         });
     }
-}
-DBInterface.prototype.logSuppressedChanges = function() {
-    var changes = this._suppressedChangeLogEntries[0];
-    var docs = this._suppressedChangeLogEntries[1];
-    this._suppressedChangeLogEntries = [[], []];
-    return this._logChanges(changes, docs);
-}
-DBInterface.prototype._logChanges = function(changes, docs) {
-    var lthis = this;
-    var i = this._lastChangeSeq;
-
-    if (changes.length === 0 && docs.length === 0) {
-        return $.when(true);
-    }
-
-    function findNextFreeChangeFile(i) {
-        return lthis._storage.exists('data/changes/' + i).pipe(function(ex) {
-            return ex ? findNextFreeChangeFile(i + 1) : i;
-        });
-    }
-    var data = {type: this._remote ? 'remote' : 'local', changes: changes};
-    return this._storage.acquireLock('data/changes').pipe(function() {
-        return findNextFreeChangeFile(lthis._lastChangeSeq + 1).pipe(function(i) {
-            lthis._changeSeqsToIgnore[i] = 1;
-            return lthis._storage.write(lthis._path + '/data/changes/' + i, data).pipe(function() {
-                return lthis._storage.releaseLock('data/changes').pipe(function() {
-                    if (i % 10 === 9) {
-                        lthis._writeChangeSummaryFiles(i);
-                    }
-                    if (!lthis._remote) {
-                        docs.forEach(function(doc) {
-                            lthis._sendChangeToCache(doc);
-                            lthis._trigger('change', doc);
-                        });
-                    }
-                    return true;
-                });
-            });
-        });
-    });
-}
-DBInterface.prototype._writeChangeSummaryFiles = function(seq) {
-    var digits = 1;
-    while (true) {
-        var exp = Math.pow(10, digits);
-        if (exp > seq + 1 || (seq + 1) % exp !== 0)
-            return;
-
-        var prefix = Math.floor(seq / exp);
-        this._writeChangeSummaryFile(prefix, digits);
-        digits ++;
-    }
-}
-DBInterface.prototype._writeChangeSummaryFile = function(prefix, digits) {
-    var lthis = this;
-
-    var changes = {};
-    var exp = Math.pow(10, digits);
-    return this._getChanges(prefix * exp, (prefix + 1) * exp - 1, function(seq, change) {
-        changes[seq] = change;
-    }).pipe(function() {
-        return lthis._writeChangeSummary(prefix, digits, changes);
-    });
 }
 DBInterface.prototype.saveDoc = function(doc, options) {
     if (!this._initialized)
@@ -579,13 +403,17 @@ DBInterface.prototype.saveRevisions = function(docs) {
 
     var lthis = this;
     return DeferredSynchronizer($.map(docs, function(doc) {
-        return lthis._saveDoc(doc, {'suppressChangeLog': true,
+        return lthis._saveDoc(doc, {'postponeChangeLog': true,
                                     'suppressRevCheck': true,
                                     'suppressLocking': true});
     })).pipe(function() {
-        return lthis.logSuppressedChanges();
+        return lthis.logPostponedChanges();
         /* XXX return value and conflicts are currently ignored */
     });
+}
+DBInterface.prototype.logPostponedChanges = function() {
+    return DeferredSynchronizer([this._localChangeLog.logPostponedChanges(),
+                                 this._sharedChangeLog.logPostponedChanges()]);
 }
 DBInterface.prototype._genID = function() {
     var id = '';

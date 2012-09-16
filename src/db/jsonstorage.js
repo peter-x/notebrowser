@@ -3,22 +3,8 @@ define(['jquery', 'ui/logger', 'util/deferredsynchronizer', 'db/accessors'],
 "use strict";
 
 function JSONStorage(path) {
-    this._path = path || this._pathFromDocumentLocation();
+    this._path = path;
     this._fs = Accessors(this._path);
-}
-JSONStorage.prototype._pathFromDocumentLocation = function() {
-    var path;
-    if (document.location.protocol == 'http:' || document.location.protocol == 'https:') {
-        path = document.location.href; /* XXX unescape? */
-    } else {
-        path = unescape(document.location.pathname);
-    }
-    var i = path.lastIndexOf('/');
-    if (i < 0) {
-        return path;
-    } else {
-        return path.substr(0, i);
-    }
 }
 JSONStorage.prototype.exists = function(path) {
     return this._fs.exists(this._path + '/' + path);

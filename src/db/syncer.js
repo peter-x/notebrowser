@@ -106,7 +106,7 @@ function fetchRevisions(target, remoteDB, ids, lastSeq, messageBox) {
                                 logger.showInfo($("<span/>").text(text).append(link), messageBox, true);
                             });
                         });
-                        /* XXX suppress change log */
+                        /* XXX postpone change log */
                         processes.push(target.setRemoteSeq(lastSeq));
                         return DeferredSynchronizer(processes).pipe(function() {
                             /* XXX errors? */
@@ -150,13 +150,13 @@ function pushRevisions(target, revsToIgnore, messageBox) {
                 var proc;
                 if (target.isSelective()) {
                     proc = DeferredSynchronizer($.map(notes, function(note) {
-                        return note.setLocalSeq(target.getID(), lastSeq, {'suppressChangeLog': true});
+                        return note.setLocalSeq(target.getID(), lastSeq, {'postponeChangeLog': true});
                     }));
                 } else {
-                    proc = target.setLocalSeq(lastSeq, {'suppressChangeLog': true});
+                    proc = target.setLocalSeq(lastSeq, {'postponeChangeLog': true});
                 }
                 return proc.pipe(function() {
-                    return DB.local.logSuppressedChanges();
+                    return DB.local.logPostponedChanges();
                 });
             });
         });

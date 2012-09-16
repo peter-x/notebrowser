@@ -38,9 +38,7 @@ ChangeLog.prototype.initChangeListener = function() {
             }
             lthis._getChange(i).done(function(change) {
                 change.changes.forEach(function(path) {
-                    lthis._storage.read(path).done(function(doc) {
-                        lthis._trigger('change', doc);
-                    });
+                    lthis._trigger('change', path, change.type);
                 });
             });
         });
@@ -53,19 +51,19 @@ ChangeLog.prototype.initChangeListener = function() {
     });
 }
 ChangeLog.prototype._getChange = function(seq) {
-    return this._storage.read('data/changes/' + seq);
+    return this._storage.read('' + seq);
 }
 ChangeLog.prototype._getChangeSummary = function(prefix, droppedDigits) {
-    return this._storage.read('data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'));
+    return this._storage.read('' + prefix + (new Array(droppedDigits + 1)).join('x'));
 }
 ChangeLog.prototype._writeChangeSummary = function(prefix, droppedDigits, data) {
-    return this._storage.write('data/changes/' + prefix + (new Array(droppedDigits + 1)).join('x'), data);
+    return this._storage.write('' + prefix + (new Array(droppedDigits + 1)).join('x'), data);
 }
 ChangeLog.prototype._changeExists = function(seq) {
-    return this._storage.exists('data/changes/' + seq);
+    return this._storage.exists('' + seq);
 }
 ChangeLog.prototype._determineLastChangeSeq = function() {
-    return this._storage.listDir('data/changes').pipe(function(files) {
+    return this._storage.listDir('').pipe(function(files) {
         var largest = 0;
         files.forEach(function(f) {
             if (f.match(/^\d*$/) && f - 0 > largest)
@@ -191,23 +189,23 @@ ChangeLog.prototype.logChanges = function(changes, docs) {
     }
 
     function findNextFreeChangeFile(i) {
-        return lthis._storage.exists('data/changes/' + i).pipe(function(ex) {
+        return lthis._storage.exists('' + i).pipe(function(ex) {
             return ex ? findNextFreeChangeFile(i + 1) : i;
         });
     }
     var data = {type: this._remote ? 'remote' : 'local', changes: changes};
-    return this._storage.acquireLock('data/changes').pipe(function() {
+    return this._storage.acquireLock('').pipe(function() {
         return findNextFreeChangeFile(lthis._lastChangeSeq + 1).pipe(function(i) {
             lthis._changeSeqsToIgnore[i] = 1;
-            return lthis._storage.write('data/changes/' + i, data).pipe(function() {
-                return lthis._storage.releaseLock('data/changes').pipe(function() {
+            return lthis._storage.write('' + i, data).pipe(function() {
+                return lthis._storage.releaseLock('').pipe(function() {
                     if (i % 10 === 9) {
                         lthis._writeChangeSummaryFiles(i);
                     }
                     if (!lthis._remote) {
-                        docs.forEach(function(doc) {
-                            lthis._trigger('change', doc);
-                        });
+                        for (var i = 0; i < changes.length; i ++) {
+                            lthis._trigger('change', changes[i], 'local', docs[i]);
+                        }
                     }
                     return true;
                 });
