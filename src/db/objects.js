@@ -426,6 +426,7 @@ var NoteRevision = Base.extend({
         return NoteRevision.findCommonAncestor(this.getNoteID(), this.getID(), otherRev.getID());
     },
     save: function(noteID, text, tags, author, date, revType, parents) {
+        /* no locking for revisions because they are not changed */
         return this._save(function(dbObj) {
             if ('_id' in dbObj || '_rev' in dbObj)
                 throw new Error("Only new revisions can be saved.");
@@ -440,7 +441,7 @@ var NoteRevision = Base.extend({
             /* TODO enforce normal form (encoding, etc) */
             dbObj._id = noteID + '/' + Crypto.md5(JSON.stringify(dbObj));
             return dbObj;
-        });
+        }, {'suppressLocking': true});
     }
 });
 
