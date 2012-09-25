@@ -412,8 +412,12 @@ DBInterface.prototype.saveRevisions = function(docs) {
     });
 }
 DBInterface.prototype.logPostponedChanges = function() {
-    return DeferredSynchronizer([this._localChangeLog.logPostponedChanges(),
-                                 this._sharedChangeLog.logPostponedChanges()]);
+    var procs = [];
+    if (this._localChangeLog !== null)
+        procs.push(this._localChangeLog.logPostponedChanges());
+    if (this._sharedChangeLog !== null)
+        procs.push(this._sharedChangeLog.logPostponedChanges());
+    return DeferredSynchronizer(procs);
 }
 DBInterface.prototype._genID = function() {
     var id = '';
